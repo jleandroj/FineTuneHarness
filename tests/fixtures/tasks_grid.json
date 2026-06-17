@@ -1,0 +1,14 @@
+[
+  {"task_key": "k3-sft",      "kind": "train", "k": 3,  "technique": "sft",      "timeout_seconds": 3600},
+  {"task_key": "k3-lora",     "kind": "train", "k": 3,  "technique": "lora",     "timeout_seconds": 3600},
+  {"task_key": "k3-bitfit",   "kind": "train", "k": 3,  "technique": "bitfit",   "timeout_seconds": 3600},
+  {"task_key": "k4-sft",      "kind": "train", "k": 4,  "technique": "sft",      "timeout_seconds": 3600},
+  {"task_key": "k4-lora",     "kind": "train", "k": 4,  "technique": "lora",     "timeout_seconds": 3600},
+  {"task_key": "k4-bitfit",   "kind": "train", "k": 4,  "technique": "bitfit",   "timeout_seconds": 3600},
+  {"task_key": "k5-sft",      "kind": "train", "k": 5,  "technique": "sft",      "timeout_seconds": 3600},
+  {"task_key": "k5-lora",     "kind": "train", "k": 5,  "technique": "lora",     "timeout_seconds": 3600},
+  {"task_key": "k5-bitfit",   "kind": "train", "k": 5,  "technique": "bitfit",   "timeout_seconds": 3600},
+  {"task_key": "k6-sft",      "kind": "train", "k": 6,  "technique": "sft",      "timeout_seconds": 3600},
+  {"task_key": "k6-lora",     "kind": "train", "k": 6,  "technique": "lora",     "timeout_seconds": 3600},
+  {"task_key": "k6-bitfit",   "kind": "train", "k": 6,  "technique": "bitfit",   "timeout_seconds": 3600}
+]

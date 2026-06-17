@@ -1,0 +1,21 @@
+{
+  "project": {
+    "name": "promoter-species-ablation",
+    "description": "k-mer tokenizer (k=3..6) × technique (sft/lora/bitfit) ablation grid"
+  },
+  "executor": {
+    "kind": "local",
+    "max_workers": 4
+  },
+  "artifacts": {
+    "root": "./artifacts/ablation"
+  },
+  "experiment": {
+    "model_id": "bert-base-uncased",
+    "seed": 42,
+    "data_version": "epd-v1.0",
+    "epochs": 30,
+    "batch_size": 32,
+    "max_per_species": 5000
+  }
+}

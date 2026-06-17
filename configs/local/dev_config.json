@@ -1,0 +1,21 @@
+{
+  "project": {
+    "name": "dev-experiment",
+    "description": "Local development run — small dataset, fast iterations"
+  },
+  "executor": {
+    "kind": "local",
+    "max_workers": 2
+  },
+  "artifacts": {
+    "root": "./artifacts/dev"
+  },
+  "experiment": {
+    "model_id": "bert-base-uncased",
+    "seed": 0,
+    "data_version": "epd-v1.0-sample",
+    "epochs": 3,
+    "batch_size": 16,
+    "max_per_species": 500
+  }
+}

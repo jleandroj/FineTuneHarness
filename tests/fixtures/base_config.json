@@ -1,0 +1,11 @@
+{
+  "project": {
+    "name": "fixture-project"
+  },
+  "executor": {
+    "kind": "local"
+  },
+  "artifacts": {
+    "root": "./artifacts"
+  }
+}

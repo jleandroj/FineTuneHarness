@@ -1,0 +1,4 @@
+[
+  {"task_key": "task-a", "kind": "train"},
+  {"task_key": "task-b", "kind": "eval"}
+]

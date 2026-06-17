@@ -1,0 +1,8 @@
+[
+  {"task_key": "k3-sft",    "kind": "train", "k": 3, "technique": "sft",    "timeout_seconds": 300, "max_attempts": 1},
+  {"task_key": "k3-lora",   "kind": "train", "k": 3, "technique": "lora",   "timeout_seconds": 300, "max_attempts": 1},
+  {"task_key": "k3-bitfit", "kind": "train", "k": 3, "technique": "bitfit", "timeout_seconds": 300, "max_attempts": 1},
+  {"task_key": "k6-sft",    "kind": "train", "k": 6, "technique": "sft",    "timeout_seconds": 300, "max_attempts": 1},
+  {"task_key": "k6-lora",   "kind": "train", "k": 6, "technique": "lora",   "timeout_seconds": 300, "max_attempts": 1},
+  {"task_key": "k6-bitfit", "kind": "train", "k": 6, "technique": "bitfit", "timeout_seconds": 300, "max_attempts": 1}
+]

@@ -1,0 +1,21 @@
+{
+  "project": {
+    "name": "promoter-species-id-prod",
+    "description": "Production full 6x12 ablation grid — human vs mouse EPD promoters"
+  },
+  "executor": {
+    "kind": "local",
+    "max_workers": 8
+  },
+  "artifacts": {
+    "root": "/mnt/artifacts/promoter-species-id"
+  },
+  "experiment": {
+    "model_id": "bert-base-uncased",
+    "seed": 42,
+    "data_version": "epd-v1.0",
+    "epochs": 30,
+    "batch_size": 32,
+    "max_per_species": null
+  }
+}
