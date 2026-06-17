@@ -24,4 +24,7 @@ def test_worker_leases_and_completes_one_task(tmp_path: Path) -> None:
     assert task is not None
     tasks = store.list_tasks(run_id)
     assert len(tasks) == 1
-    assert tasks[0].result == {"ok": True, "task_key": "cell-1"}
+    assert tasks[0].result is not None
+    assert tasks[0].result["ok"] is True
+    assert tasks[0].result["task_key"] == "cell-1"
+    assert "wall_seconds" in tasks[0].result

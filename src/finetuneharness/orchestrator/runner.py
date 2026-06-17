@@ -6,6 +6,7 @@ from dataclasses import asdict
 from typing import Any
 
 from finetuneharness.observability.logging import get_logger
+from finetuneharness.orchestrator.approval import ApprovalGate
 from finetuneharness.orchestrator.lifecycle import ensure_run_transition
 from finetuneharness.state.models import EventRecord, RunRecord, RunStatus, TaskRecord, TaskStatus
 from finetuneharness.state.store import StateStore
@@ -81,6 +82,24 @@ class FineTuneRunner:
                 )
             )
         return target
+
+    def await_approval(self, run_id: str, gate: ApprovalGate) -> None:
+        """Run the gate check for a validated run. Raises ApprovalError if denied."""
+        run = self._store.get_run(run_id)
+        if run is None:
+            raise KeyError(f"unknown run_id: {run_id}")
+        tasks = self._store.list_tasks(run_id)
+        gate.check(run, tasks)
+        self._store.append_event(
+            EventRecord(
+                event_id=uuid.uuid4().hex,
+                run_id=run_id,
+                task_id=None,
+                kind="run_approved",
+                payload={"gate": type(gate).__name__},
+            )
+        )
+        self._log.info("run_approved", extra={"run_id": run_id})
 
     def get_run_status(self, run_id: str) -> dict[str, object]:
         status = self.refresh_run_status(run_id)

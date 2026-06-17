@@ -71,6 +71,7 @@ class LocalWorker:
         self._hooks.fire("before_task", task=task)
 
         timeout_seconds = self._resolve_timeout(task)
+        started = time.monotonic()
         try:
             result = self._execute(handler, task, timeout_seconds)
         except TimeoutError as exc:
@@ -123,6 +124,10 @@ class LocalWorker:
             self._hooks.fire("after_task_failure", task=task, error=exc)
             self._hooks.fire("on_run_status_changed", run_id=run_id, status=run_status)
             raise
+
+        wall_seconds = round(time.monotonic() - started, 3)
+        if "wall_seconds" not in result:
+            result = {**result, "wall_seconds": wall_seconds}
 
         self._store.update_task_status(task.task_id, TaskStatus.SUCCEEDED, result=result)
         if self._artifact_store is not None:

@@ -4,6 +4,9 @@ import argparse
 import json
 from pathlib import Path
 
+from finetuneharness.evaluation.comparator import compare_runs
+from finetuneharness.evaluation.report import format_report, report_to_dict
+from finetuneharness.orchestrator.approval import ApprovalError, InteractiveApprovalGate
 from finetuneharness.orchestrator.runner import FineTuneRunner
 from finetuneharness.state.memory_store import InMemoryStateStore
 from finetuneharness.state.sqlite import SQLiteStateStore
@@ -31,6 +34,16 @@ def main() -> None:
     list_artifacts_cmd = sub.add_parser("list-artifacts", help="List artifacts for a run")
     list_artifacts_cmd.add_argument("--run-id", required=True)
     list_artifacts_cmd.add_argument("--state-db", default=".finetuneharness/state.db")
+
+    start_cmd = sub.add_parser("start-run", help="Interactively approve a validated run before workers start")
+    start_cmd.add_argument("--run-id", required=True)
+    start_cmd.add_argument("--state-db", default=".finetuneharness/state.db")
+
+    compare_cmd = sub.add_parser("compare-runs", help="Compare two or more runs (first is baseline)")
+    compare_cmd.add_argument("--run-id", dest="run_ids", action="append", required=True, metavar="RUN_ID",
+                             help="Run IDs to compare; first is baseline. Repeat for each run.")
+    compare_cmd.add_argument("--format", dest="fmt", choices=["text", "json"], default="text")
+    compare_cmd.add_argument("--state-db", default=".finetuneharness/state.db")
 
     args = parser.parse_args()
 
@@ -81,4 +94,27 @@ def main() -> None:
             }
             for artifact in artifacts
         ], indent=2))
+        return
+
+    if args.command == "start-run":
+        store = SQLiteStateStore(Path(args.state_db))
+        runner = FineTuneRunner(store)
+        gate = InteractiveApprovalGate()
+        try:
+            runner.await_approval(args.run_id, gate)
+            print(f"Run {args.run_id} approved. Start workers to begin execution.")
+        except ApprovalError as exc:
+            print(f"Denied: {exc}")
+            raise SystemExit(1)
+        return
+
+    if args.command == "compare-runs":
+        if len(args.run_ids) < 2:
+            parser.error("compare-runs requires at least two --run-id values")
+        store = SQLiteStateStore(Path(args.state_db))
+        report = compare_runs(args.run_ids, store)
+        if args.fmt == "json":
+            print(json.dumps(report_to_dict(report), indent=2))
+        else:
+            print(format_report(report))
         return

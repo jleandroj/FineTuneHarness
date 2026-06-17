@@ -7,6 +7,7 @@ from typing import Any, Callable
 HookFn = Callable[..., None]
 
 VALID_POINTS = frozenset({
+    "before_run_start",
     "before_task",
     "after_task_success",
     "after_task_failure",

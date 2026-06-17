@@ -24,4 +24,6 @@ def test_worker_persists_result_artifact(tmp_path: Path) -> None:
     worker.run_once(run_id=run_id, handler=lambda task: {"ok": True})
 
     task = store.list_tasks(run_id)[0]
-    assert task.result == {"ok": True}
+    assert task.result is not None
+    assert task.result["ok"] is True
+    assert "wall_seconds" in task.result
