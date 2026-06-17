@@ -45,6 +45,14 @@ tests/unit/      — 42 tests
 | `skills/axolotl.md` | Full fine-tuning orchestration |
 | `skills/lm-evaluation-harness.md` | Model evaluation, benchmarks |
 | `skills/weights-and-biases.md` | Experiment tracking |
+| `skills/unsloth.md` | Fast fine-tuning, 2x speed, less memory |
+| `skills/llama-factory.md` | Full fine-tuning framework, curriculum learning |
+| `skills/trl-fine-tuning.md` | RLHF, DPO, PPO, SFTTrainer |
+| `skills/grpo-rl-training.md` | RL with group rewards |
+| `skills/deepspeed.md` | Multi-GPU distributed training |
+| `skills/model-pruning.md` | Structured and unstructured pruning |
+| `skills/mlflow.md` | Experiment tracking and model registry |
+| `skills/tensorboard.md` | Training visualization and metrics |
 
 ## Architecture
 
