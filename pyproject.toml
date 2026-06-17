@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "finetuneharness"
+version = "0.1.0"
+description = "Reliable execution and evaluation harness for long-running ML and agent workloads"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2",
+  "ruff>=0.5",
+  "mypy>=1.10",
+]
+
+[project.scripts]
+finetuneharness = "finetuneharness.cli.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/finetuneharness"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
