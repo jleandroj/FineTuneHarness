@@ -53,6 +53,9 @@ tests/unit/      — 42 tests
 | `skills/model-pruning.md` | Structured and unstructured pruning |
 | `skills/mlflow.md` | Experiment tracking and model registry |
 | `skills/tensorboard.md` | Training visualization and metrics |
+| `skills/machine-learning-engineer.md` | Production serving, ONNX/TensorRT conversion, monitoring |
+| `skills/scientific-literature-researcher.md` | Literature search, published baselines, bioinformatics papers |
+| `skills/nlp-engineer.md` | BERT fine-tuning, tokenization strategies, evaluation pipelines |
 
 ## Architecture
 
@@ -66,4 +69,4 @@ tests/unit/      — 42 tests
 
 - Do NOT skip the state machine — always go through the worker, never call update_task_status directly from PENDING
 - Do NOT add features to the harness core for a specific experiment — the harness is generic, the skill is specific
-- registry/ and evaluation/ are stubs — do not import from them until implemented
+- registry/ is a stub — do not import from it until implemented
