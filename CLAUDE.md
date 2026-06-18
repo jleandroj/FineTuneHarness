@@ -87,18 +87,30 @@ tests/unit/      — 42 tests
   OOM is still possible; a GPU OOM is treated as transient (`is_oom_error`),
   requeues the task up to `max_oom_retries` times, and lowers the concurrency
   ceiling (converging toward sequential under pressure).
-- **drain_concurrent is PROCESS-ISOLATED (reproducibility-critical).** Each task
-  runs in its own forked process, because `apply_seed` mutates the *process-global*
-  numpy/torch/random RNG: running seeded tasks as threads in one process would let
-  siblings reset and interleave the shared RNG non-deterministically, silently
-  destroying reproducibility. Consequences: (1) it REQUIRES a persistent
-  `SQLiteStateStore` (children reopen it; InMemory raises `TypeError`); (2) the OOM
-  retry budget is counted from persisted `task_oom_requeued` events, not worker
-  memory, since each attempt is a fresh process; (3) `before_run_start` fires once
-  (parent, pre-fork) — children inherit `_started_runs`/`_run_seeds` so they still
-  apply the seed without re-firing; (4) handlers run in forked children. Do NOT
-  switch this to threads. With no GPU detectable (`free_gpu_memory_mb() is None`,
-  e.g. CPU CI) it degrades to sequential `drain`.
+- **drain_concurrent is PROCESS-ISOLATED via `spawn` (reproducibility- AND
+  GPU-critical).** Each task runs in its own `multiprocessing.spawn` process, for two
+  reasons: (a) `apply_seed` mutates the *process-global* numpy/torch/random RNG, so
+  seeded tasks as threads would interleave one shared RNG non-deterministically and
+  silently destroy reproducibility; (b) `spawn` (not `fork`) gives a fresh interpreter
+  that never inherits a CUDA context the parent may have created (importing the
+  handler module can do this) — `fork` there is the classic CUDA-after-fork crash.
+  Do NOT switch to `fork` or threads (a test asserts `spawn`). Consequences: (1) it
+  REQUIRES a persistent `SQLiteStateStore` (children reopen it; InMemory raises
+  `TypeError`); (2) handlers must be importable `module:function` (spawn pickles
+  them, like FirejailSandbox); custom hooks/sandbox do NOT propagate to children;
+  (3) the OOM retry budget is counted from persisted `task_oom_requeued` events, not
+  worker memory, since each attempt is a fresh process; (4) `before_run_start` fires
+  once in the parent — children inherit the cached seed and apply it without
+  re-firing. With no GPU detectable (`free_gpu_memory_mb() is None`, e.g. CPU CI) it
+  degrades to sequential `drain`.
+- **Dead-worker recovery.** A child OS-killed (e.g. OOM-killer) after
+  `mark_task_running` dies without reporting and leaves its task RUNNING — which NO
+  lease reclaim recovers (reclaim only covers LEASED). drain_concurrent detects the
+  dead child (queue timeout + not alive) and calls `store.reclaim_dead_worker(run_id,
+  worker_id, max_reclaims)`: requeue to PENDING for retry, or FAIL once the budget is
+  spent (`task_abandoned` event) so the run terminates as degraded instead of hanging
+  on a lost task or returning false success. Each child gets a unique
+  `worker_id` (`<worker>-c<n>`) precisely so its stranded task is identifiable.
 - Execution mode is recorded: both `drain`/`drain_concurrent` emit a `drain_started`
   event with the mode. `assess_reproducibility(run, events)` and
   `export_manifest(run, tasks, artifacts, events)` accept events and surface the
@@ -108,10 +120,16 @@ tests/unit/      — 42 tests
 - Configure concurrency via `executor.concurrency` (mode/min_free_mb/max_concurrent/
   settle_seconds/max_oom_retries) or CLI flags `--concurrency-mode/--min-free-mb/
   --max-concurrent`. NVML reading needs `pip install -e '.[gpu]'` (pynvml); without
-  it, nvidia-smi is the fallback. Note: one GPU ⇒ effectively sequential for jobs
-  that fill it; multiple small jobs that fit can overlap. For multi-host scale, run
-  several `finetuneharness run` processes against the same store — the lease
-  guarantees each task runs exactly once (see `tests/concurrency/test_multiprocess.py`).
+  it, nvidia-smi is the fallback. **SINGLE-GPU scope:** the monitor gates on the
+  minimum free memory across all physical devices (it does not honor
+  `CUDA_VISIBLE_DEVICES`) and children are NOT pinned per GPU — every child uses
+  cuda:0. On a multi-GPU host it would measure the wrong device and never distribute
+  tasks; it logs a `multi_gpu_not_supported` warning if >1 device is seen. For
+  multi-GPU, run one `finetuneharness run` per GPU (`CUDA_VISIBLE_DEVICES=N`) instead.
+  Note: one GPU ⇒ effectively sequential for jobs that fill it; small jobs that fit
+  can overlap. For multi-host scale, run several `finetuneharness run` processes
+  against the same store — the lease guarantees each task runs exactly once (see
+  `tests/concurrency/test_multiprocess.py`).
 - Approval gate is ENFORCED: `finetuneharness run` refuses a run with no recorded
   approval (a `run_approved` event from `start-run`) unless `--skip-approval` is
   passed. Enforcement lives in the CLI only; `worker.drain*` itself is unguarded so

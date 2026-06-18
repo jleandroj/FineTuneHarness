@@ -554,7 +554,7 @@ class LocalWorker:
         child_seq = 0
         ceiling = max(1, concurrency.max_concurrent)
         min_free = concurrency.min_free_mb
-        in_flight: dict[int, mp.Process] = {}
+        in_flight: dict[int, tuple[mp.Process, str]] = {}
         try:
             while True:
                 # ── Admission ──────────────────────────────────────────────
@@ -569,13 +569,14 @@ class LocalWorker:
                     if free is not None and in_flight and free < min_free:
                         break
                     child_seq += 1
+                    child_wid = f"{self.worker_id}-c{child_seq}"
                     proc = ctx.Process(
                         target=_run_once_subprocess,
-                        args=(db_path, run_id, f"{self.worker_id}-c{child_seq}",
-                              handler, seed, self._max_oom_retries, result_q),
+                        args=(db_path, run_id, child_wid, handler, seed,
+                              self._max_oom_retries, result_q),
                     )
                     proc.start()
-                    in_flight[proc.pid] = proc
+                    in_flight[proc.pid] = (proc, child_wid)
                     # Let the just-admitted task allocate before re-reading memory.
                     if concurrency.settle_seconds > 0:
                         time.sleep(concurrency.settle_seconds)
@@ -588,25 +589,31 @@ class LocalWorker:
                 try:
                     pid, outcome = result_q.get(timeout=0.5)
                 except _queue.Empty:
-                    # Reap any child that died without reporting (e.g. OS OOM-killer
-                    # or segfault). Its task stays RUNNING until its lease expires and
-                    # is reclaimed; back off so we do not immediately respawn into the
-                    # same memory wall.
-                    for dead_pid, dead in list(in_flight.items()):
+                    # A child that died WITHOUT reporting (e.g. OS OOM-killer or
+                    # segfault) left its task LEASED/RUNNING — which no lease reclaim
+                    # ever recovers. Recover it explicitly via the child's worker_id:
+                    # requeue (retry) or, once the reclaim budget is spent, FAIL it so
+                    # the run terminates instead of hanging on a lost task.
+                    for dead_pid, (dead, dead_wid) in list(in_flight.items()):
                         if not dead.is_alive():
                             dead.join()
                             del in_flight[dead_pid]
+                            reclaim = self._store.reclaim_dead_worker(
+                                run_id=run_id, worker_id=dead_wid,
+                                max_reclaims=self._max_oom_retries,
+                            )
                             ceiling = max(1, ceiling - 1)
                             self._log.warning(
                                 "worker_child_died_unreported",
                                 extra={"run_id": run_id, "pid": dead_pid,
-                                       "exitcode": dead.exitcode},
+                                       "worker_id": dead_wid, "exitcode": dead.exitcode,
+                                       "reclaim": reclaim},
                             )
                     continue
 
-                proc = in_flight.pop(pid, None)
-                if proc is not None:
-                    proc.join()
+                entry = in_flight.pop(pid, None)
+                if entry is not None:
+                    entry[0].join()
                 if outcome == "succeeded":
                     succeeded += 1
                     if stop_fn is not None and stop_fn():
@@ -621,8 +628,13 @@ class LocalWorker:
                     )
                 # "empty" (lost lease race) / "error" (recorded by run_once): keep going
         finally:
-            for proc in in_flight.values():
+            # Teardown safety net: join any survivors and recover a task they may
+            # have left non-terminal (early stop, or death during join).
+            for proc, wid in in_flight.values():
                 proc.join()
+                self._store.reclaim_dead_worker(
+                    run_id=run_id, worker_id=wid, max_reclaims=self._max_oom_retries,
+                )
 
         failed_tasks = [
             t for t in self._store.list_tasks(run_id)

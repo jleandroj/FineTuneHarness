@@ -156,6 +156,40 @@ class InMemoryStateStore(StateStore):
                     count += 1
         return count
 
+    def reclaim_dead_worker(self, *, run_id: str, worker_id: str, max_reclaims: int) -> str:
+        with self._lock:
+            task = next(
+                (
+                    t for t in self._tasks.values()
+                    if t.run_id == run_id and t.lease_owner == worker_id
+                    and t.status in (TaskStatus.LEASED, TaskStatus.RUNNING)
+                ),
+                None,
+            )
+            if task is None:
+                return "none"
+            prior = sum(
+                1 for e in self._events
+                if e.task_id == task.task_id and e.kind == "lease_reclaimed"
+            )
+            if prior >= max_reclaims:
+                self._tasks[task.task_id] = replace(
+                    task, status=TaskStatus.FAILED, lease_owner=None, leased_until=None,
+                    error=f"worker {worker_id!r} died without reporting "
+                          f"(reclaimed {prior} times; OS OOM-kill?)",
+                )
+                kind, outcome = "task_abandoned", "failed"
+            else:
+                self._tasks[task.task_id] = replace(
+                    task, status=TaskStatus.PENDING, lease_owner=None, leased_until=None,
+                )
+                kind, outcome = "lease_reclaimed", "requeued"
+            self._events.append(EventRecord(
+                event_id=uuid.uuid4().hex, run_id=run_id, task_id=task.task_id,
+                kind=kind, payload={"dead_worker": worker_id, "prior_reclaims": prior},
+            ))
+            return outcome
+
     def append_event(self, event: EventRecord) -> None:
         with self._lock:
             self._events.append(event)

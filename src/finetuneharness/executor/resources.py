@@ -25,11 +25,13 @@ from typing import Protocol, runtime_checkable
 
 from finetuneharness.observability.logging import get_logger
 
-# Substrings that mark a GPU out-of-memory condition across torch / CUDA / cuBLAS.
-# "outofmemoryerror" covers the FirejailSandbox case where the original exception
-# class name is flattened into a RuntimeError message string.
+# Substrings that mark specifically a GPU/CUDA out-of-memory condition. NOTE: the
+# bare phrase "out of memory" is deliberately excluded — a *system RAM* OOM also
+# contains it, and lowering GPU concurrency does not help a host-RAM OOM. Each
+# marker here is CUDA/cuBLAS/cuDNN-specific. "outofmemoryerror" covers the
+# FirejailSandbox case where torch's class name is flattened into a string.
 _OOM_MARKERS = (
-    "out of memory",
+    "cuda out of memory",
     "cuda error: out of memory",
     "cublas_status_alloc_failed",
     "cudnn_status_alloc_failed",
@@ -40,10 +42,11 @@ _OOM_MARKERS = (
 def is_oom_error(exc: BaseException) -> bool:
     """True if *exc* looks like a GPU/CUDA out-of-memory error.
 
-    Detects ``torch.cuda.OutOfMemoryError`` by class name (without importing
-    torch) and the common CUDA OOM messages carried on a ``RuntimeError`` —
-    including the FirejailSandbox case where the original type is flattened into
-    a ``RuntimeError`` string ("handler raised in sandbox: OutOfMemoryError: ...").
+    Priority is the exception *type*: ``torch.cuda.OutOfMemoryError`` (matched by
+    class name, without importing torch). Otherwise fall back to CUDA-specific
+    message markers — deliberately NOT the bare "out of memory", which a system
+    RAM OOM also carries (GPU concurrency backoff would not help that case).
+    Also handles the FirejailSandbox flattening ("...: OutOfMemoryError: ...").
     """
     if type(exc).__name__ in ("OutOfMemoryError", "CudaOutOfMemoryError"):
         return True
@@ -70,7 +73,7 @@ class ConcurrencyConfig:
     mode: str = "sequential"
     min_free_mb: float = 2000.0
     max_concurrent: int = 8
-    settle_seconds: float = 5.0
+    settle_seconds: float = 1.0
     max_oom_retries: int = 5
 
     VALID_MODES = ("sequential", "resource_aware")
@@ -94,18 +97,22 @@ class ResourceMonitor(Protocol):
 class NvmlMonitor:
     """Free-GPU-memory probe via NVML (pynvml), falling back to the nvidia-smi CLI.
 
-    Reports the MINIMUM free memory across visible GPUs — the binding constraint
-    for admitting another task. Returns None when no GPU is present, so callers
-    degrade to sequential rather than crash.
+    Reports the MINIMUM free memory across visible GPUs. Returns None when no GPU
+    is present, so callers degrade to sequential rather than crash.
 
-    Note: both NVML and nvidia-smi report *physical* devices and do not honor
-    ``CUDA_VISIBLE_DEVICES``. On a single-GPU host (the common case) this is exact;
-    on multi-GPU hosts with pinned processes the minimum-across-all reading is a
-    conservative lower bound, which is the safe direction for admission control.
+    SCOPE — single-GPU only. Both NVML and nvidia-smi report *physical* devices and
+    do not honor ``CUDA_VISIBLE_DEVICES``, and drain_concurrent does NOT pin child
+    processes to specific GPUs (every child uses the default device, cuda:0). On a
+    multi-GPU host this means the gate may measure a different GPU than the tasks
+    use — under-admitting (if another GPU is full) or over-admitting into cuda:0
+    (if other GPUs are free), and tasks are never distributed across GPUs. The
+    monitor logs a warning once if it sees >1 device. Proper multi-GPU support
+    (per-child pinning + per-device measurement) is not implemented.
     """
 
     def __init__(self) -> None:
         self._log = get_logger("finetuneharness.resources")
+        self._warned_multigpu = False
         self._pynvml = None
         try:
             import pynvml  # type: ignore
@@ -115,6 +122,20 @@ class NvmlMonitor:
         except Exception:  # pynvml missing, no driver, or init failed
             self._pynvml = None
 
+    def _warn_if_multigpu(self, count: int) -> None:
+        if count > 1 and not self._warned_multigpu:
+            self._warned_multigpu = True
+            self._log.warning(
+                "multi_gpu_not_supported",
+                extra={
+                    "gpu_count": count,
+                    "detail": "resource_aware concurrency assumes a single GPU; it "
+                              "gates on the minimum free across all devices and does "
+                              "not pin children per GPU. Use sequential mode or one "
+                              "run process per GPU (CUDA_VISIBLE_DEVICES).",
+                },
+            )
+
     def free_gpu_memory_mb(self) -> float | None:
         if self._pynvml is not None:
             try:
@@ -122,6 +143,7 @@ class NvmlMonitor:
                 count = p.nvmlDeviceGetCount()
                 if count == 0:
                     return None
+                self._warn_if_multigpu(count)
                 frees = []
                 for i in range(count):
                     handle = p.nvmlDeviceGetHandleByIndex(i)
@@ -156,4 +178,5 @@ class NvmlMonitor:
                 vals.append(float(line))
             except ValueError:
                 continue
+        self._warn_if_multigpu(len(vals))
         return min(vals) if vals else None

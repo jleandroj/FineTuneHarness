@@ -65,6 +65,11 @@ def _h_always_oom(task):
     raise RuntimeError("CUDA out of memory")
 
 
+def _h_hard_exit(task):
+    """Die without reporting (simulates an OS OOM-kill) after the task is RUNNING."""
+    os._exit(137)
+
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 class _FakeMonitor:
@@ -284,6 +289,27 @@ def test_oom_task_is_requeued_then_succeeds(tmp_path: Path) -> None:
     assert succeeded == 1
     assert store.list_tasks(run_id)[0].status is TaskStatus.SUCCEEDED
     assert "task_oom_requeued" in [e.kind for e in store.list_events(run_id)]
+
+
+def test_os_killed_child_is_recovered_not_lost(tmp_path: Path) -> None:
+    """A child that dies WITHOUT reporting (OS OOM-kill) must not silently strand its
+    task in RUNNING. drain_concurrent reclaims it; once the budget is spent it FAILs,
+    so the run terminates as degraded instead of hanging / returning false success.
+    """
+    store, run_id = _make_run(tmp_path, [{"task_key": "killed"}])
+    worker = LocalWorker(worker_id="w", store=store)
+
+    with pytest.raises(DegradedRunError):
+        worker.drain_concurrent(
+            run_id=run_id, handler=_h_hard_exit,
+            concurrency=_resource_aware(max_concurrent=1, max_oom_retries=2),
+            monitor=_FakeMonitor(50000),
+        )
+    task = store.list_tasks(run_id)[0]
+    assert task.status is TaskStatus.FAILED, "OS-killed task must end FAILED, not stuck RUNNING"
+    kinds = [e.kind for e in store.list_events(run_id)]
+    assert kinds.count("lease_reclaimed") == 2
+    assert "task_abandoned" in kinds
 
 
 def test_oom_task_fails_after_exhausting_retries(tmp_path: Path) -> None:

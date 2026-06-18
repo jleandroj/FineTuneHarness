@@ -189,3 +189,55 @@ def test_requeue_expired_lease_emits_event(tmp_path: Path) -> None:
 
     kinds = [e.kind for e in store.list_events("run-evt")]
     assert "lease_expired" in kinds, "no lease_expired event emitted on reclaim"
+
+
+def _seed_running_task(store, *, run_id: str, task_id: str, worker_id: str) -> None:
+    """Create a run+task and drive it to RUNNING, leased by *worker_id*."""
+    store.create_run(RunRecord(
+        run_id=run_id, name="dead-worker", status=RunStatus.VALIDATED,
+        config={"project": {"name": "d"}, "executor": {"kind": "local"},
+                "artifacts": {"root": "./a"}},
+    ))
+    store.create_task(TaskRecord(
+        task_id=task_id, run_id=run_id, task_key="cell", status=TaskStatus.PENDING,
+        payload={"kind": "train"},
+    ))
+    store.lease_next_pending_task(run_id=run_id, worker_id=worker_id, lease_seconds=300)
+    store.mark_task_running(task_id)
+
+
+def test_reclaim_dead_worker_requeues_then_fails(tmp_path: Path) -> None:
+    """A RUNNING task owned by a dead worker is requeued, then FAILED past budget.
+
+    Regression: RUNNING tasks (worker OS-killed after mark_task_running) were never
+    reclaimed by any path — lease reclaim only covers LEASED.
+    """
+    store = SQLiteStateStore(tmp_path / "state.db")
+    _seed_running_task(store, run_id="r", task_id="t", worker_id="w-c1")
+
+    # Budget 2: first two reclaims requeue, third abandons.
+    assert store.reclaim_dead_worker(run_id="r", worker_id="w-c1", max_reclaims=2) == "requeued"
+    assert store.list_tasks("r")[0].status is TaskStatus.PENDING
+    assert store.list_tasks("r")[0].lease_owner is None
+
+    store.lease_next_pending_task(run_id="r", worker_id="w-c2", lease_seconds=300)
+    store.mark_task_running("t")
+    assert store.reclaim_dead_worker(run_id="r", worker_id="w-c2", max_reclaims=2) == "requeued"
+
+    store.lease_next_pending_task(run_id="r", worker_id="w-c3", lease_seconds=300)
+    store.mark_task_running("t")
+    assert store.reclaim_dead_worker(run_id="r", worker_id="w-c3", max_reclaims=2) == "failed"
+
+    task = store.list_tasks("r")[0]
+    assert task.status is TaskStatus.FAILED
+    kinds = [e.kind for e in store.list_events("r")]
+    assert kinds.count("lease_reclaimed") == 2
+    assert "task_abandoned" in kinds
+
+
+def test_reclaim_dead_worker_none_when_no_inflight_task(tmp_path: Path) -> None:
+    store = SQLiteStateStore(tmp_path / "state.db")
+    _seed_running_task(store, run_id="r", task_id="t", worker_id="w-c1")
+    # A different worker holds nothing in flight.
+    assert store.reclaim_dead_worker(run_id="r", worker_id="other", max_reclaims=2) == "none"
+    assert store.list_tasks("r")[0].status is TaskStatus.RUNNING

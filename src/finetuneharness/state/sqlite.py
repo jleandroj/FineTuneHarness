@@ -371,6 +371,56 @@ class SQLiteStateStore(StateStore):
                 )
             return len(expired)
 
+    def reclaim_dead_worker(self, *, run_id: str, worker_id: str, max_reclaims: int) -> str:
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT task_id FROM tasks
+                WHERE run_id = ? AND lease_owner = ? AND status IN (?, ?)
+                LIMIT 1
+                """,
+                (run_id, worker_id, TaskStatus.LEASED.value, TaskStatus.RUNNING.value),
+            ).fetchone()
+            if row is None:
+                return "none"
+            task_id = row["task_id"]
+            prior = conn.execute(
+                "SELECT COUNT(*) AS n FROM events WHERE task_id = ? AND kind = ?",
+                (task_id, "lease_reclaimed"),
+            ).fetchone()["n"]
+
+            if prior >= max_reclaims:
+                conn.execute(
+                    "UPDATE tasks SET status = ?, lease_owner = NULL, leased_until = ?,"
+                    " error = ? WHERE task_id = ?",
+                    (
+                        TaskStatus.FAILED.value, None,
+                        f"worker {worker_id!r} died without reporting "
+                        f"(reclaimed {prior} times; OS OOM-kill?)",
+                        task_id,
+                    ),
+                )
+                kind, outcome = "task_abandoned", "failed"
+            else:
+                conn.execute(
+                    "UPDATE tasks SET status = ?, lease_owner = NULL, leased_until = NULL"
+                    " WHERE task_id = ?",
+                    (TaskStatus.PENDING.value, task_id),
+                )
+                kind, outcome = "lease_reclaimed", "requeued"
+
+            conn.execute(
+                "INSERT INTO events (event_id, run_id, task_id, kind, payload_json, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    uuid.uuid4().hex, run_id, task_id, kind,
+                    json.dumps({"dead_worker": worker_id, "prior_reclaims": prior}, sort_keys=True),
+                    utc_now().isoformat(),
+                ),
+            )
+            return outcome
+
     def append_event(self, event: EventRecord) -> None:
         with closing(self._connect()) as conn, conn:
             conn.execute(

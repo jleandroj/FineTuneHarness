@@ -55,6 +55,22 @@ class StateStore(ABC):
     def requeue_expired_leases(self, *, run_id: str) -> int: ...
 
     @abstractmethod
+    def reclaim_dead_worker(self, *, run_id: str, worker_id: str, max_reclaims: int) -> str:
+        """Recover the task a dead worker left LEASED or RUNNING.
+
+        A worker whose process died (e.g. OS OOM-killer after mark_task_running)
+        leaves its task non-terminal and otherwise unrecoverable — lease reclaim
+        only covers LEASED, never RUNNING. Given the *worker_id* of a process known
+        to be dead, find its in-flight task and:
+          * requeue it to PENDING (returns "requeued") if it has been reclaimed
+            fewer than *max_reclaims* times, so it can be retried; or
+          * mark it FAILED (returns "failed") once the reclaim budget is exhausted,
+            so a task that keeps killing its host terminates instead of looping.
+        Returns "none" if the worker holds no in-flight task.
+        """
+        ...
+
+    @abstractmethod
     def append_event(self, event: EventRecord) -> None: ...
 
     @abstractmethod
