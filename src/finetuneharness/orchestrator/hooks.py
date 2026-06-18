@@ -54,6 +54,15 @@ class HookRegistry:
         with self._lock:
             return sum(len(fns) for fns in self._hooks.values())
 
+    def all_hook_names(self) -> list[str]:
+        """Qualnames of every registered hook across all points (for guards/auditing)."""
+        with self._lock:
+            return [
+                getattr(fn, "__qualname__", repr(fn))
+                for fns in self._hooks.values()
+                for fn in fns
+            ]
+
     def fire(self, point: str, **kwargs: Any) -> None:
         with self._lock:
             fns = list(self._hooks.get(point, []))

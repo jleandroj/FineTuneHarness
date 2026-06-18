@@ -101,7 +101,11 @@ tests/unit/      — 42 tests
   factories — `LocalWorker(hooks_factory="module:fn", sandbox_factory="module:fn")` —
   so children recreate them; passing a *concrete* non-default `hooks`/`sandbox` to
   drain_concurrent RAISES (they cannot cross to a spawned child). A parity test
-  asserts hooks fire equally in both modes; (4) the OOM retry budget is counted from
+  asserts hooks fire equally in both modes. drain_concurrent ALSO rejects (a)
+  cumulative hooks (EarlyStopping/Metrics/Progress/Checkpoint — per-instance state
+  cannot aggregate across task processes, so EarlyStopping would never trip) and
+  (b) `stop_fn` (its decision needs aggregate state no task process sees) — use
+  sequential `drain()` for those; (4) the OOM retry budget is counted from
   persisted `task_oom_requeued` events, not worker memory, since each attempt is a
   fresh process; (5) `before_run_start` fires once in the parent — children inherit
   the cached seed and apply it without re-firing. With no GPU detectable

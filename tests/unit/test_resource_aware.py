@@ -105,6 +105,22 @@ class _DummySandbox:
         return handler(task)
 
 
+class EarlyStoppingHook:  # name intentionally matches the cumulative-hook guard list
+    """Stand-in whose method qualname trips the cumulative-hook guard."""
+
+    def after_task_success(self, *args, **kwargs):
+        pass
+
+
+def _cumulative_hook_factory():
+    """Factory producing a registry with a cumulative (EarlyStopping) hook."""
+    from finetuneharness.orchestrator.hooks import HookRegistry
+
+    reg = HookRegistry()
+    reg.register("after_task_success", EarlyStoppingHook().after_task_success)
+    return reg
+
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 class _FakeMonitor:
@@ -400,6 +416,32 @@ def test_drain_concurrent_rejects_custom_sandbox_without_factory(tmp_path: Path)
         worker.drain_concurrent(
             run_id=run_id, handler=_h_always_oom,
             concurrency=_resource_aware(), monitor=_FakeMonitor(50000),
+        )
+
+
+def test_drain_concurrent_rejects_cumulative_hooks(tmp_path: Path) -> None:
+    """Cumulative hooks (EarlyStopping/Metrics/Progress/Checkpoint) keep per-instance
+    state that cannot aggregate across the separate task processes — reject, not mislead."""
+    store, run_id = _make_run(tmp_path, [{"task_key": "t"}])
+    worker = LocalWorker(
+        worker_id="w", store=store, hooks_factory=f"{__name__}:_cumulative_hook_factory"
+    )
+    with pytest.raises(RuntimeError, match="cumulative hooks"):
+        worker.drain_concurrent(
+            run_id=run_id, handler=_h_ok,
+            concurrency=_resource_aware(), monitor=_FakeMonitor(50000),
+        )
+
+
+def test_drain_concurrent_rejects_stop_fn(tmp_path: Path) -> None:
+    """stop_fn relies on aggregate state no single task process sees — rejected."""
+    store, run_id = _make_run(tmp_path, [{"task_key": "t"}])
+    worker = LocalWorker(worker_id="w", store=store)
+    with pytest.raises(RuntimeError, match="stop_fn"):
+        worker.drain_concurrent(
+            run_id=run_id, handler=_h_ok,
+            concurrency=_resource_aware(), monitor=_FakeMonitor(50000),
+            stop_fn=lambda: True,
         )
 
 

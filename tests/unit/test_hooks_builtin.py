@@ -240,6 +240,25 @@ class TestMetricsHook:
             assert "max" in summary["accuracy"]
             assert "stdev" in summary["accuracy"]
 
+    def test_get_summary_reads_jsonl_not_memory(self, tmp_path):
+        """get_summary aggregates from the JSONL file (the cross-process source of
+        truth), so a fresh hook instance reflects metrics written by other processes."""
+        import json
+
+        metrics_file = tmp_path / "metrics.jsonl"
+        metrics_file.write_text(
+            json.dumps({"task_key": "a", "accuracy": 0.8}) + "\n"
+            + json.dumps({"task_key": "b", "accuracy": 0.9}) + "\n"
+        )
+        hook = MetricsHook(output_file=str(metrics_file))
+        # This instance never recorded anything in memory ...
+        assert hook._metrics == []
+        # ... yet the summary reflects the file written elsewhere.
+        summary = hook.get_summary()
+        assert summary["count"] == 2
+        assert summary["accuracy"]["min"] == 0.8
+        assert summary["accuracy"]["max"] == 0.9
+
 
     def test_concurrent_writes_produce_valid_jsonl(self, tmp_path):
         """Concurrent calls from multiple threads must not corrupt metrics.jsonl.

@@ -28,6 +28,17 @@ from finetuneharness.state.store import StateStore
 
 TaskHandler = Callable[[TaskRecord], dict[str, object]]
 
+# Hooks that accumulate state across tasks in instance memory. Under drain_concurrent
+# each task runs in its own process with a fresh hook instance, so their state never
+# aggregates (EarlyStopping would never trip; Metrics.get_summary/Progress would see
+# one task). drain_concurrent rejects them rather than give silently-wrong results.
+_CUMULATIVE_HOOK_CLASSES = (
+    "EarlyStoppingHook",
+    "MetricsHook",
+    "ProgressHook",
+    "CheckpointHook",
+)
+
 
 class DegradedRunError(Exception):
     """Raised by drain() when one or more tasks failed, timed out, or were degenerate.
@@ -152,7 +163,7 @@ class LocalWorker:
         # cap so a transient memory contention requeues instead of burning a retry.
         # The per-task budget is counted from persisted 'task_oom_requeued' events
         # (NOT worker memory) because under drain_concurrent each attempt is a fresh
-        # forked process with its own worker instance.
+        # spawned process with its own worker instance.
         self._max_oom_retries = 0
 
     def run_once(self, *, run_id: str, handler: TaskHandler) -> TaskRecord | None:
@@ -420,7 +431,7 @@ class LocalWorker:
         marks the task FAILED, so an unschedulable task can never loop forever.
 
         The budget is counted from persisted ``task_oom_requeued`` events, not
-        worker memory: under drain_concurrent each attempt is a separate forked
+        worker memory: under drain_concurrent each attempt is a separate spawned
         process, so an in-memory counter would always read 1 and never exhaust.
         """
         prior = sum(
@@ -535,6 +546,16 @@ class LocalWorker:
             self._log.info("no_gpu_detected_draining_sequentially", extra={"run_id": run_id})
             return self.drain(run_id=run_id, handler=handler, stop_fn=stop_fn)
 
+        # stop_fn (e.g. EarlyStopping.should_stop) decides from aggregate state that no
+        # single task process can see — unsound in concurrent mode. Reject it here; the
+        # no-GPU path above still honors it because that runs sequentially.
+        if stop_fn is not None:
+            raise RuntimeError(
+                "drain_concurrent: stop_fn is not supported in concurrent mode — its "
+                "decision relies on aggregate state that each task process cannot see. "
+                "Use sequential drain() for early stopping."
+            )
+
         from finetuneharness.state.sqlite import SQLiteStateStore
         if not isinstance(self._store, SQLiteStateStore):
             raise TypeError(
@@ -555,6 +576,20 @@ class LocalWorker:
                 "drain_concurrent: this worker has a non-default sandbox that cannot "
                 "reach spawned children. Pass sandbox_factory='module:function', "
                 "or use drain()."
+            )
+        # Cumulative hooks keep per-instance state that cannot aggregate across the
+        # separate processes each task runs in — reject rather than mislead.
+        offenders = sorted({
+            name.split(".", 1)[0]
+            for name in self._hooks.all_hook_names()
+            if name.split(".", 1)[0] in _CUMULATIVE_HOOK_CLASSES
+        })
+        if offenders:
+            raise RuntimeError(
+                f"drain_concurrent: cumulative hooks {offenders} keep per-instance state "
+                "that does not aggregate across the separate task processes (EarlyStopping "
+                "would never trip; Metrics.get_summary/Progress would see one task). Use "
+                "sequential drain() for these hooks."
             )
 
         self._max_oom_retries = concurrency.max_oom_retries
@@ -688,6 +723,18 @@ class LocalWorker:
             )
         return succeeded
 
+    def _prime_for_child(self, *, run_id: str, seed: int | None, max_oom_retries: int) -> None:
+        """Prepare a freshly-built worker inside a spawned child.
+
+        Sets the OOM budget and pre-marks the run as started with its seed cached, so
+        run_once applies the seed but does NOT re-fire before_run_start (the parent
+        fired it once before spawning). One explicit entry point instead of poking
+        several private attributes from the subprocess module function.
+        """
+        self._max_oom_retries = max_oom_retries
+        self._started_runs.add(run_id)
+        self._run_seeds[run_id] = seed
+
     def _record_drain_started(self, run_id: str, concurrency: ConcurrencyConfig) -> None:
         """Record the actual execution mode so reproducibility tooling can see it."""
         self._store.append_event(
@@ -807,9 +854,7 @@ def _run_once_subprocess(
         worker_id=worker_id, store=store,
         hooks_factory=hooks_factory, sandbox_factory=sandbox_factory,
     )
-    worker._max_oom_retries = max_oom_retries
-    worker._started_runs.add(run_id)
-    worker._run_seeds[run_id] = seed
+    worker._prime_for_child(run_id=run_id, seed=seed, max_oom_retries=max_oom_retries)
     try:
         task = worker.run_once(run_id=run_id, handler=handler)
         result_q.put((os.getpid(), "succeeded" if task is not None else "empty"))

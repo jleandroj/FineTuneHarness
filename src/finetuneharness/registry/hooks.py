@@ -183,25 +183,50 @@ class MetricsHook:
                     fcntl.flock(f, fcntl.LOCK_UN)
 
     def get_summary(self) -> dict[str, Any]:
-        with self._lock:
-            if not self._metrics:
-                return {"count": 0}
-            import statistics
+        """Aggregate from the JSONL file, the cross-process source of truth.
 
-            numeric = {}
-            for m in self._metrics:
-                for k, v in m.items():
-                    if isinstance(v, (int, float)) and k not in ("timestamp",):
-                        numeric.setdefault(k, []).append(v)
-            summary = {"count": len(self._metrics)}
-            for k, vals in numeric.items():
-                summary[k] = {
-                    "mean": statistics.mean(vals),
-                    "min": min(vals),
-                    "max": max(vals),
-                    "stdev": statistics.stdev(vals) if len(vals) > 1 else 0,
-                }
-            return summary
+        Reading the file (not the in-memory ``self._metrics``) means the summary is
+        correct even when metrics were written by several worker processes — each
+        appends to the same JSONL — or after a restart.
+        """
+        metrics = self._read_metrics_file()
+        if not metrics:
+            return {"count": 0}
+        import statistics
+
+        numeric: dict[str, list[float]] = {}
+        for m in metrics:
+            for k, v in m.items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and k != "timestamp":
+                    numeric.setdefault(k, []).append(v)
+        summary: dict[str, Any] = {"count": len(metrics)}
+        for k, vals in numeric.items():
+            summary[k] = {
+                "mean": statistics.mean(vals),
+                "min": min(vals),
+                "max": max(vals),
+                "stdev": statistics.stdev(vals) if len(vals) > 1 else 0,
+            }
+        return summary
+
+    def _read_metrics_file(self) -> list[dict]:
+        path = Path(self.output_file)
+        if not path.exists():
+            return []
+        metrics: list[dict] = []
+        with open(path) as f:
+            self._acquire_file_lock(f)
+            try:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            metrics.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            continue
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+        return metrics
 
 
 @dataclass
