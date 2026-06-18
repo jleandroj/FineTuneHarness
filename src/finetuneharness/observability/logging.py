@@ -10,7 +10,9 @@ from typing import Any
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            # record.created is the epoch float set when Logger.log() was called —
+            # earlier than format() is called, so timestamps reflect the actual event.
+            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
             "logger": record.name,
             "level": record.levelname,
             "message": record.getMessage(),
@@ -19,6 +21,10 @@ class JsonFormatter(logging.Formatter):
             value = getattr(record, key, None)
             if value is not None:
                 payload[key] = value
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        if record.stack_info:
+            payload["stack"] = self.formatStack(record.stack_info)
         return json.dumps(payload, ensure_ascii=False)
 
 
