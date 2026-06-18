@@ -8,6 +8,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
+from pathlib import Path
 from typing import Callable, NoReturn
 
 from finetuneharness.artifacts.store import ArtifactStore
@@ -94,13 +95,16 @@ class LocalWorker:
     live resource signal, not a fixed thread count.
 
     Reproducibility under concurrency: each concurrent task runs in its OWN process
-    (fork), so the per-task seed (apply_seed mutates the *process-global* numpy/
-    torch/random RNG) is isolated per task. Thread-based concurrency would corrupt
-    reproducibility — sibling threads share one global RNG and interleave draws
-    non-deterministically. drain_concurrent therefore requires a persistent (SQLite)
-    store the child processes can reopen, and handlers run in forked children. The
-    OOM retry budget is tracked via persisted events (not worker memory) because
-    each attempt is a fresh process.
+    (multiprocessing 'spawn'), so the per-task seed (apply_seed mutates the
+    *process-global* numpy/torch/random RNG) is isolated per task. Thread-based
+    concurrency would corrupt reproducibility — sibling threads share one global RNG
+    and interleave draws non-deterministically. 'spawn' (not 'fork') also avoids the
+    CUDA-after-fork crash: a fresh interpreter never inherits a CUDA context the
+    parent may have created. Consequences: drain_concurrent requires a persistent
+    (SQLite) store the children reopen; handlers must be importable (module:function,
+    like FirejailSandbox) since spawn pickles them; custom hooks/sandbox do not
+    propagate to children; the OOM retry budget is tracked via persisted events (not
+    worker memory) because each attempt is a fresh process.
     """
 
     def __init__(
@@ -522,30 +526,32 @@ class LocalWorker:
             )
 
         self._max_oom_retries = concurrency.max_oom_retries
+        db_path = str(self._store._path)
 
-        # Run-start bookkeeping ONCE in the parent, before forking. Children inherit
-        # _started_runs + _run_seeds via fork, so run_once still applies the seed in
-        # each child but does NOT re-fire before_run_start per process.
+        # Run-start bookkeeping ONCE in the parent, before spawning any child. The
+        # cached seed is passed to each child so its run_once applies the seed but
+        # does NOT re-fire before_run_start per process.
         if run_id not in self._started_runs:
             self._started_runs.add(run_id)
             _run = self._store.get_run(run_id)
             self._run_seeds[run_id] = _run.seed if _run is not None else None
             self._hooks.fire("before_run_start", run_id=run_id)
         self._record_drain_started(run_id, concurrency)
+        seed = self._run_seeds.get(run_id)
 
-        ctx = mp.get_context("fork")
+        # 'spawn' (NOT 'fork'): a fresh interpreter per task. fork would inherit any
+        # CUDA context already initialized in this parent (e.g. by importing the
+        # handler module) and hand children a corrupted context — the classic
+        # CUDA-after-fork crash. spawn pickles the target + args, so the handler must
+        # be importable (module:function), like FirejailSandbox. Children rebuild a
+        # default-hooks/-sandbox worker from db_path; custom hooks/sandbox do not
+        # propagate to children (documented limitation of concurrent mode).
+        ctx = mp.get_context("spawn")
         result_q: mp.Queue = ctx.Queue()
-
-        def _child() -> None:
-            # Runs in a forked child: its own RNG globals, own SQLite connections.
-            try:
-                task = self.run_once(run_id=run_id, handler=handler)
-                result_q.put((os.getpid(), "succeeded" if task is not None else "empty"))
-            except Exception as exc:  # noqa: BLE001 — outcome relayed to the parent
-                result_q.put((os.getpid(), "oom" if is_oom_error(exc) else "error"))
 
         succeeded = 0
         stopped = False
+        child_seq = 0
         ceiling = max(1, concurrency.max_concurrent)
         min_free = concurrency.min_free_mb
         in_flight: dict[int, mp.Process] = {}
@@ -562,7 +568,12 @@ class LocalWorker:
                     # the first admission must always proceed.
                     if free is not None and in_flight and free < min_free:
                         break
-                    proc = ctx.Process(target=_child)
+                    child_seq += 1
+                    proc = ctx.Process(
+                        target=_run_once_subprocess,
+                        args=(db_path, run_id, f"{self.worker_id}-c{child_seq}",
+                              handler, seed, self._max_oom_retries, result_q),
+                    )
                     proc.start()
                     in_flight[proc.pid] = proc
                     # Let the just-admitted task allocate before re-reading memory.
@@ -689,3 +700,37 @@ class LocalWorker:
     def _resolve_timeout(self, task: TaskRecord) -> int | None:
         raw = task.payload.get("timeout_seconds", self._timeout_policy.timeout_seconds)
         return None if raw is None else int(raw)
+
+
+def _run_once_subprocess(
+    db_path: str,
+    run_id: str,
+    worker_id: str,
+    handler: TaskHandler,
+    seed: int | None,
+    max_oom_retries: int,
+    result_q: "mp.Queue",
+) -> None:
+    """Module-level entrypoint for a spawned child: run exactly one task.
+
+    Must be importable (top-level) because ``spawn`` pickles the target by
+    reference. A fresh interpreter means an isolated process-global RNG, which is
+    why drain_concurrent is reproducible. The child rebuilds a default-hooks worker
+    from *db_path* (SQLite is process-safe — fresh connection per call) and runs
+    one ``run_once``; the outcome is relayed to the parent via *result_q*.
+
+    The seed is pre-seeded and the run pre-marked started so run_once applies the
+    seed without re-firing before_run_start (the parent fired it once).
+    """
+    from finetuneharness.state.sqlite import SQLiteStateStore
+
+    store = SQLiteStateStore(Path(db_path))
+    worker = LocalWorker(worker_id=worker_id, store=store)
+    worker._max_oom_retries = max_oom_retries
+    worker._started_runs.add(run_id)
+    worker._run_seeds[run_id] = seed
+    try:
+        task = worker.run_once(run_id=run_id, handler=handler)
+        result_q.put((os.getpid(), "succeeded" if task is not None else "empty"))
+    except Exception as exc:  # noqa: BLE001 — outcome relayed to the parent
+        result_q.put((os.getpid(), "oom" if is_oom_error(exc) else "error"))
