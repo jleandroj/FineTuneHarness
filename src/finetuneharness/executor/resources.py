@@ -124,6 +124,7 @@ class NvmlMonitor:
     def __init__(self) -> None:
         self._log = get_logger("finetuneharness.resources")
         self._warned_multigpu = False
+        self._warned_no_signal = False
         self._pynvml = None
         try:
             import pynvml  # type: ignore
@@ -162,8 +163,23 @@ class NvmlMonitor:
                     frees.append(mem.free / (1024 * 1024))
                 return frees or None
             except Exception:
-                self._log.warning("nvml_query_failed_falling_back_to_smi")
+                # e.g. NVMLError_NotSupported on unified-memory GPUs (Grace-Blackwell
+                # GB10) where per-device free memory is not reported. Try nvidia-smi.
+                self._warn_no_signal_once("nvml")
         return self._nvidia_smi_per_device()
+
+    def _warn_no_signal_once(self, source: str) -> None:
+        if not self._warned_no_signal:
+            self._warned_no_signal = True
+            self._log.warning(
+                "gpu_free_memory_not_reported",
+                extra={
+                    "source": source,
+                    "detail": "free GPU memory is not queryable here (e.g. a "
+                              "unified-memory GPU, or no driver). resource_aware "
+                              "draining falls back to sequential.",
+                },
+            )
 
     def free_gpu_memory_mb(self) -> float | None:
         per = self.free_memory_per_device()

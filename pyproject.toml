@@ -13,9 +13,10 @@ dependencies = []
 [project.optional-dependencies]
 # Resource-aware concurrency reads free GPU memory via NVML. Optional: without it
 # (and without nvidia-smi) the monitor reports no GPU and draining falls back to
-# sequential.
+# sequential. Use nvidia-ml-py (the maintained package that provides the `pynvml`
+# module) rather than the deprecated standalone `pynvml` that torch warns about.
 gpu = [
-  "pynvml>=11.5",
+  "nvidia-ml-py>=12.0",
 ]
 dev = [
   "pytest>=8.2",
