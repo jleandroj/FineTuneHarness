@@ -81,33 +81,24 @@ _common_input_validator, _common_output_validator = _make_common_validators()
 
 
 def _create_skill_handler(technique: str) -> Callable:
-    """Create a handler that delegates to the actual implementation.
+    """Return a handler that raises NotImplementedError at call time.
 
-    In a real deployment, this would import and call the actual technique implementation.
-    For now, it returns a structured result indicating the technique was called.
+    Built-in SkillSpecs define the *contract* (input/output schema, validators).
+    The *implementation* must be registered via TaskDispatcher before running:
+
+        dispatcher.register("lora", my_lora_training_fn)
+
+    Returning zeros here would be silent data corruption — the validator would
+    accept them as valid results and they would be written to the CSV.
     """
 
     def handler(task_record, **payload) -> dict[str, Any]:
-        # This is a placeholder - in production this would call the actual training code
-        # from promoter_species_id.techniques.{technique}.run_cell()
-        import time
-
-        start = time.monotonic()
-
-        # Simulate work - replace with actual implementation
-        # result = run_cell(k=payload["k"], technique=technique, ...)
-
-        return {
-            "accuracy": 0.0,  # placeholder
-            "f1": 0.0,
-            "precision": 0.0,
-            "recall": 0.0,
-            "auc": 0.0,
-            "n_params": 0,
-            "wall_seconds": time.monotonic() - start,
-            "technique": technique,
-            "k": payload.get("k", 0),
-        }
+        raise NotImplementedError(
+            f"Skill '{technique}' has no implementation registered. "
+            f"Call dispatcher.register('{technique}', your_handler) "
+            f"before running tasks of this kind. "
+            f"See finetuneharness/registry/builtin_skills.py for the expected output schema."
+        )
 
     handler.__name__ = f"run_{technique}"
     return handler

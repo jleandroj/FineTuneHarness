@@ -10,9 +10,10 @@
   "artifacts": {
     "root": "./artifacts/dev"
   },
+  "seed": 0,
+  "dataset_hash": "epd-v1.0-sample",
   "experiment": {
     "model_id": "bert-base-uncased",
-    "seed": 0,
     "data_version": "epd-v1.0-sample",
     "epochs": 3,
     "batch_size": 16,

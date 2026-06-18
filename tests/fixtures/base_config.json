@@ -7,5 +7,7 @@
   },
   "artifacts": {
     "root": "./artifacts"
-  }
+  },
+  "seed": 42,
+  "dataset_hash": "sha256:fixture"
 }

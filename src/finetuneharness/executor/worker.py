@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -105,19 +106,24 @@ class LocalWorker:
         self._runner.refresh_run_status(run_id)
         self._log.info("task_running", extra={"run_id": run_id, "task_id": task.task_id})
 
-        self._hooks.fire("before_task", task=task)
-
-        timeout_seconds = self._resolve_timeout(task)
-
-        # Apply seed before every handler call so the handler doesn't have to.
-        # The harness owns seed enforcement; the handler sees a reproducible state.
+        # Apply seed before hooks and handler so every participant sees a
+        # reproducible RNG state from the start of the task.
         _run = self._store.get_run(run_id)
         if _run is not None and _run.seed is not None:
             apply_seed(_run.seed)
 
+        # Give hooks and handler a shallow payload copy so before_task mutations
+        # (e.g. CheckpointHook injecting checkpoint_dir) never touch the
+        # canonical TaskRecord that the store owns.
+        working_task = dataclasses.replace(task, payload=dict(task.payload))
+
+        self._hooks.fire("before_task", task=working_task)
+
+        timeout_seconds = self._resolve_timeout(working_task)
+
         started = time.monotonic()
         try:
-            result = self._execute(handler, task, timeout_seconds)
+            result = self._execute(handler, working_task, timeout_seconds)
         except TimeoutError as exc:
             self._store.update_task_status(task.task_id, TaskStatus.TIMED_OUT, error=str(exc))
             self._store.append_event(
@@ -131,11 +137,11 @@ class LocalWorker:
             )
             run_status = self._runner.refresh_run_status(run_id)
             self._log.info("task_timed_out", extra={"run_id": run_id, "task_id": task.task_id})
-            self._hooks.fire("after_task_timeout", task=task)
+            self._hooks.fire("after_task_timeout", task=working_task)
             self._hooks.fire("on_run_status_changed", run_id=run_id, status=run_status)
             raise
         except Exception as exc:
-            max_attempts = self._resolve_max_attempts(task)
+            max_attempts = self._resolve_max_attempts(working_task)
             if attempt_count < max_attempts:
                 self._store.update_task_status(task.task_id, TaskStatus.PENDING, error=str(exc))
                 self._store.append_event(
@@ -165,9 +171,9 @@ class LocalWorker:
                 )
             run_status = self._runner.refresh_run_status(run_id)
             self._log.info("task_failed", extra={"run_id": run_id, "task_id": task.task_id})
-            self._hooks.fire("after_task_failure", task=task, error=exc)
+            self._hooks.fire("after_task_failure", task=working_task, error=exc)
             self._hooks.fire("on_run_status_changed", run_id=run_id, status=run_status)
-            if attempt_count < self._resolve_max_attempts(task):
+            if attempt_count < self._resolve_max_attempts(working_task):
                 delay = self._retry_policy.delay_for_attempt(attempt_count)
                 if delay > 0:
                     self._log.info(
@@ -182,7 +188,7 @@ class LocalWorker:
         if "wall_seconds" not in result:
             result = {**result, "wall_seconds": wall_seconds}
 
-        outcome = validate_result(result, method=task.payload.get("method"))
+        outcome = validate_result(result, method=working_task.payload.get("method"))
         result = {**result, "_validation_status": outcome.status.value}
         if outcome.status in (ResultStatus.DEGENERATE_RESULT, ResultStatus.FAILED_VALIDATION):
             result["_validation_errors"] = outcome.validation_errors
@@ -191,7 +197,7 @@ class LocalWorker:
         # (e.g. gpu_allocated_mb from GPUMemoryHook) are included in the stored
         # result. HookRegistry.fire() is fire-and-forget: a crashing hook is
         # logged and skipped, so the store write always completes.
-        self._hooks.fire("after_task_success", task=task, result=result)
+        self._hooks.fire("after_task_success", task=working_task, result=result)
         self._store.update_task_status(task.task_id, TaskStatus.SUCCEEDED, result=result)
         if self._artifact_store is not None:
             self._artifact_store.write_json_artifact(

@@ -88,6 +88,36 @@ class TestCheckpointHook:
             hook.before_task(task)
             assert task.payload.get("checkpoint_dir") == str(ckpt_dir)
 
+    def test_checkpoint_hook_does_not_mutate_store_payload(self, tmp_path):
+        """before_task injection must not leak into the canonical store record.
+
+        The worker passes a payload copy to hooks; CheckpointHook writes
+        checkpoint_dir into that copy. The original TaskRecord in the store
+        must never see that key.
+        """
+        store = SQLiteStateStore(tmp_path / "state.db")
+        runner = FineTuneRunner(store)
+        registry = HookRegistry()
+
+        ckpt_dir = tmp_path / "checkpoints"
+        hook = CheckpointHook(checkpoint_dir=str(ckpt_dir))
+        registry.register("before_task", hook.before_task)
+        registry.register("after_task_success", hook.after_task_success)
+
+        run_id = runner.create_run(name="r", config=_BASE_CONFIG, tasks=[{"task_key": "ckpt_task"}])
+        payload_before = dict(store.list_tasks(run_id)[0].payload)
+
+        worker = LocalWorker(worker_id="w", store=store, runner=runner, hooks=registry)
+        worker.run_once(run_id=run_id, handler=lambda t: {})
+
+        stored = store.list_tasks(run_id)[0]
+        assert "checkpoint_dir" not in stored.payload, (
+            f"CheckpointHook mutated the canonical store payload: {stored.payload}"
+        )
+        assert stored.payload == payload_before, (
+            f"store payload changed after run: before={payload_before}, after={stored.payload}"
+        )
+
 
 class TestMetricsHook:
     def test_collects_metrics(self):
@@ -347,3 +377,88 @@ class TestCleanupHookNoDummyModel:
                 assert mock_linear.call_count == 0
         except ImportError:
             pytest.skip("torch not installed")
+
+
+# ── GPUMemoryHook writes gpu_allocated_mb to SQLite ──────────────────────────
+
+class TestGPUMemoryHookPersistsSQLite:
+    """GPUMemoryHook.after_task_success must write gpu_allocated_mb into SQLite.
+
+    torch.cuda is mocked so the test runs without a GPU.
+
+    Two invariants are tested:
+    - The field survives the full JSON round-trip to SQLite (end-state check).
+    - The hook fires *before* update_task_status, so the field is already
+      present in the dict at the moment SQLite serialises it (ordering check).
+      The ordering test would catch a regression where the two lines are swapped.
+    """
+
+    def _fake_cuda(self):
+        from unittest.mock import MagicMock
+        cuda = MagicMock()
+        cuda.is_available.return_value = True
+        cuda.memory_allocated.return_value = 512 * 1024 ** 2   # 512 MB
+        cuda.memory_reserved.return_value = 1024 * 1024 ** 2   # 1024 MB
+        return cuda
+
+    def test_gpu_allocated_mb_persisted_to_sqlite(self, tmp_path):
+        from unittest.mock import MagicMock, patch
+        import finetuneharness.registry.hooks as hooks_module
+
+        store = SQLiteStateStore(tmp_path / "state.db")
+        runner = FineTuneRunner(store)
+        registry = HookRegistry()
+        hook = GPUMemoryHook()
+        registry.register("after_task_success", hook.after_task_success)
+
+        run_id = runner.create_run(name="r", config=_BASE_CONFIG, tasks=[{"task_key": "gpu_task"}])
+        worker = LocalWorker(worker_id="w", store=store, runner=runner, hooks=registry)
+
+        with patch.object(hooks_module, "TORCH_AVAILABLE", True), \
+             patch.object(hooks_module, "torch", MagicMock(cuda=self._fake_cuda())):
+            worker.run_once(run_id=run_id, handler=lambda t: {"loss": 0.25})
+
+        task = store.list_tasks(run_id)[0]
+        assert task.result is not None, "result must be stored"
+        assert task.result.get("gpu_allocated_mb") == 512.0, (
+            f"gpu_allocated_mb missing or wrong in SQLite result: {task.result}"
+        )
+        assert task.result.get("gpu_reserved_mb") == 1024.0
+
+    def test_hook_fires_before_store_write(self, tmp_path):
+        """gpu_allocated_mb must already be in result when update_task_status is called.
+
+        If this test fails, after_task_success is firing after the store write —
+        the hook enrichment would be silently lost in SQLite (regression from f7af26b).
+        """
+        from unittest.mock import MagicMock, patch, call
+        import finetuneharness.registry.hooks as hooks_module
+
+        store = SQLiteStateStore(tmp_path / "state.db")
+        runner = FineTuneRunner(store)
+        registry = HookRegistry()
+        hook = GPUMemoryHook()
+        registry.register("after_task_success", hook.after_task_success)
+
+        run_id = runner.create_run(name="r", config=_BASE_CONFIG, tasks=[{"task_key": "gpu_task"}])
+        worker = LocalWorker(worker_id="w", store=store, runner=runner, hooks=registry)
+
+        result_at_store_call: dict | None = None
+        real_update = store.update_task_status
+
+        def spy_update(task_id, status, result=None, **kw):
+            nonlocal result_at_store_call
+            if status.name == "SUCCEEDED":
+                result_at_store_call = dict(result) if result else {}
+            return real_update(task_id, status, result=result, **kw)
+
+        with patch.object(hooks_module, "TORCH_AVAILABLE", True), \
+             patch.object(hooks_module, "torch", MagicMock(cuda=self._fake_cuda())), \
+             patch.object(store, "update_task_status", side_effect=spy_update):
+            worker.run_once(run_id=run_id, handler=lambda t: {"loss": 0.25})
+
+        assert result_at_store_call is not None, "update_task_status(SUCCEEDED) was never called"
+        assert "gpu_allocated_mb" in result_at_store_call, (
+            "hook fired after update_task_status — gpu_allocated_mb was not in result "
+            f"when SQLite serialised it. result seen by store: {result_at_store_call}"
+        )

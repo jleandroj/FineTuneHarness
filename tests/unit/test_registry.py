@@ -235,8 +235,12 @@ class TestBuiltinSkills:
         assert ia3_spec is not None
         assert "ia3_scale" in ia3_spec.input_schema
 
-    def test_execute_builtin_skill(self):
+    def test_unwired_skill_raises_not_returns_zeros(self):
+        """Built-in skills must raise NotImplementedError, never silently return zeros.
 
+        Returning zeros would pass output validation and corrupt the results CSV.
+        Callers must register a real implementation via dispatcher.register() first.
+        """
         task = TaskRecord(
             task_id="test-1",
             run_id="run-1",
@@ -256,13 +260,24 @@ class TestBuiltinSkills:
                 "lora_dropout": 0.1,
             },
         )
+        with pytest.raises(NotImplementedError, match="no implementation registered"):
+            execute_skill("lora", task)
 
-        result = execute_skill("lora", task)
-        assert "accuracy" in result
-        assert "f1" in result
-        assert "wall_seconds" in result
-        assert result["technique"] == "lora"
-        assert result["k"] == 3
+    def test_all_unwired_skill_handlers_raise_not_return_zeros(self):
+        """Every built-in skill handler raises NotImplementedError — none return fake zeros.
+
+        Calls the handler directly (bypassing input-schema validation) to confirm
+        no skill ever returns a dict of zeros that would silently corrupt the CSV.
+        """
+        task = TaskRecord(
+            task_id="t", run_id="r", task_key="k",
+            status=TaskStatus.PENDING, payload={},
+        )
+        for name in list_skills():
+            spec = get_skill(name)
+            assert spec is not None
+            with pytest.raises(NotImplementedError, match="no implementation registered"):
+                spec.handler(task)
 
 
 class TestCustomValidators:

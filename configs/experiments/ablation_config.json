@@ -10,9 +10,10 @@
   "artifacts": {
     "root": "./artifacts/ablation"
   },
+  "seed": 42,
+  "dataset_hash": "epd-v1.0",
   "experiment": {
     "model_id": "bert-base-uncased",
-    "seed": 42,
     "data_version": "epd-v1.0",
     "epochs": 30,
     "batch_size": 32,
