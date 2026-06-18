@@ -100,7 +100,14 @@ class FirejailSandbox:
         self._extra_args = extra_args
 
     def run(self, handler, task) -> dict[str, object]:
-        payload = pickle.dumps((handler, task))
+        try:
+            payload = pickle.dumps((handler, task))
+        except (AttributeError, pickle.PicklingError) as exc:
+            raise RuntimeError(
+                f"FirejailSandbox requires a module-level function, not a lambda or closure. "
+                f"Define your handler as a top-level def in an importable module. "
+                f"pickle error: {exc}"
+            ) from exc
         # Use sys.executable so the subprocess runs in the same venv, and pass
         # the parent's sys.path as PYTHONPATH so handlers defined in installed
         # packages (and test modules) are importable in the child process.

@@ -138,6 +138,49 @@ class TestFirejailSandboxJsonTransport:
                     sandbox.run(lambda t: {}, self._make_task())
 
 
+class TestFirejailSandboxPickleValidation:
+    """Lambda/closure handlers must fail with a clear RuntimeError, not a cryptic
+    AttributeError from pickle internals."""
+
+    def test_lambda_handler_raises_clear_error(self) -> None:
+        sandbox = FirejailSandbox.__new__(FirejailSandbox)
+        sandbox._extra_args = ()
+        task = TaskRecord(
+            task_id="t", run_id="r", task_key="k",
+            status=TaskStatus.PENDING, payload={},
+        )
+        with pytest.raises(RuntimeError, match="module-level function"):
+            sandbox.run(lambda t: {}, task)
+
+    def test_error_message_includes_actionable_hint(self) -> None:
+        sandbox = FirejailSandbox.__new__(FirejailSandbox)
+        sandbox._extra_args = ()
+        task = TaskRecord(
+            task_id="t", run_id="r", task_key="k",
+            status=TaskStatus.PENDING, payload={},
+        )
+        with pytest.raises(RuntimeError) as exc_info:
+            sandbox.run(lambda t: {}, task)
+        assert "def" in str(exc_info.value).lower() or "module" in str(exc_info.value).lower()
+
+    def test_module_level_function_does_not_raise_on_pickle(self) -> None:
+        """_ok_handler is a module-level function — pickle.dumps must succeed."""
+        sandbox = FirejailSandbox.__new__(FirejailSandbox)
+        sandbox._extra_args = ()
+        task = TaskRecord(
+            task_id="t", run_id="r", task_key="k",
+            status=TaskStatus.PENDING, payload={},
+        )
+        # Should not raise — only subprocess.run would, which we don't call here.
+        # Verify pickle succeeds by checking no RuntimeError from our guard.
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                stdout=json.dumps({"ok": True, "result": {}}).encode(),
+                stderr=b"", returncode=0,
+            )
+            sandbox.run(_ok_handler, task)  # must not raise RuntimeError for pickle
+
+
 class TestFirejailSandbox:
     def test_raises_when_firejail_missing(self) -> None:
         with patch("shutil.which", return_value=None):
