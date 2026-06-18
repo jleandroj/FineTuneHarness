@@ -44,6 +44,11 @@ class HookRegistry:
         with self._lock:
             self._hooks.setdefault(point, []).append(fn)
 
+    def hook_names(self, point: str) -> list[str]:
+        """Return qualnames of hooks registered at *point* (for event auditing)."""
+        with self._lock:
+            return [getattr(fn, "__qualname__", repr(fn)) for fn in self._hooks.get(point, [])]
+
     def fire(self, point: str, **kwargs: Any) -> None:
         with self._lock:
             fns = list(self._hooks.get(point, []))

@@ -463,11 +463,16 @@ class TestCommonOutputValidator:
         with pytest.raises(ValueError, match="technique"):
             validator({"technique": "   "})
 
-    def test_k_out_of_range_rejected(self, validator):
-        with pytest.raises(ValueError, match="k"):
-            validator({"k": 0})
-        with pytest.raises(ValueError, match="k"):
-            validator({"k": 7})
+    def test_generic_validator_ignores_k(self, validator):
+        """'k' is a biology-domain field — the generic core must NOT range-check it.
+
+        A non-genomic skill may emit 'k' with a different meaning (e.g. top-k),
+        so values outside the k-mer [1, 6] range must pass the generic validator.
+        The k range check now lives in skills/biology/validators.py.
+        """
+        validator({"k": 0})    # would have raised under the old generic validator
+        validator({"k": 7})
+        validator({"k": 50})
 
     def test_audit_examples_all_rejected(self, validator):
         """Exact values from the audit report must now be caught."""
@@ -477,6 +482,32 @@ class TestCommonOutputValidator:
             validator({"auc": 150.0})
         with pytest.raises(ValueError, match="n_params"):
             validator({"n_params": -1})
+
+
+class TestBiologyOutputValidator:
+    """k-mer output range check lives in skills/biology/validators.py, not the core."""
+
+    @pytest.fixture
+    def bio_output_validator(self):
+        import sys
+        sys.path.insert(0, str(__import__("pathlib").Path(__file__).parents[2] / "skills"))
+        from biology.validators import validate_bio_output
+        return validate_bio_output
+
+    def test_valid_k_passes(self, bio_output_validator):
+        bio_output_validator({"k": 3})
+
+    def test_k_below_range_rejected(self, bio_output_validator):
+        with pytest.raises(ValueError, match="k-mer"):
+            bio_output_validator({"k": 0})
+
+    def test_k_above_range_rejected(self, bio_output_validator):
+        with pytest.raises(ValueError, match="k-mer"):
+            bio_output_validator({"k": 7})
+
+    def test_k_optional(self, bio_output_validator):
+        """A result without 'k' must pass."""
+        bio_output_validator({"accuracy": 0.9})
 
 
 # ── Registry isolation (global singleton P2) ─────────────────────────────────

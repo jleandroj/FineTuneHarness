@@ -10,7 +10,9 @@ These hooks provide common ML experiment needs:
 
 from __future__ import annotations
 
+import fcntl
 import gc
+import json
 import os
 import threading
 import time
@@ -18,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from finetuneharness.observability.logging import get_logger
 from finetuneharness.orchestrator.hooks import HookRegistry
 from finetuneharness.state.models import RunStatus, TaskRecord, TaskStatus
 
@@ -27,6 +30,8 @@ try:
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
+
+_log = get_logger("finetuneharness.hooks")
 
 
 __all__ = [
@@ -54,7 +59,10 @@ class GPUMemoryHook:
         gc.collect()
         allocated = torch.cuda.memory_allocated() / 1024**2
         if allocated > self.threshold_mb:
-            print(f"[GPU Hook] WARNING: {allocated:.0f}MB allocated before task {task.task_key}")
+            _log.warning("gpu_memory_high_before_task", extra={
+                "task_key": task.task_key, "allocated_mb": round(allocated, 1),
+                "threshold_mb": self.threshold_mb,
+            })
 
     def after_task_success(self, task: TaskRecord, result: dict[str, Any]) -> None:
         if not TORCH_AVAILABLE or not torch.cuda.is_available():
@@ -64,7 +72,10 @@ class GPUMemoryHook:
         result["gpu_allocated_mb"] = round(allocated, 1)
         result["gpu_reserved_mb"] = round(reserved, 1)
         if allocated > self.threshold_mb:
-            print(f"[GPU Hook] High memory after {task.task_key}: {allocated:.0f}MB alloc, {reserved:.0f}MB reserved")
+            _log.warning("gpu_memory_high_after_task", extra={
+                "task_key": task.task_key, "allocated_mb": round(allocated, 1),
+                "reserved_mb": round(reserved, 1), "threshold_mb": self.threshold_mb,
+            })
         if self.cleanup_on_oom:
             torch.cuda.empty_cache()
 
@@ -72,7 +83,7 @@ class GPUMemoryHook:
         if not TORCH_AVAILABLE or not torch.cuda.is_available():
             return
         if "out of memory" in str(error).lower() or "oom" in str(error).lower():
-            print(f"[GPU Hook] OOM detected on {task.task_key}, clearing cache")
+            _log.warning("gpu_oom_detected", extra={"task_key": task.task_key, "error": str(error)})
             torch.cuda.empty_cache()
             gc.collect()
 
@@ -96,26 +107,63 @@ class CheckpointHook:
     def before_task(self, task: TaskRecord) -> None:
         with self._lock:
             self._task_count += 1
-        # Provide checkpoint directory to handler
-        if "checkpoint_dir" not in task.payload:
+        if "checkpoint_dir" in task.payload:
+            requested = Path(task.payload["checkpoint_dir"]).resolve()
+            allowed = Path(self.checkpoint_dir).resolve()
+            if not requested.is_relative_to(allowed):
+                raise ValueError(
+                    f"checkpoint_dir {task.payload['checkpoint_dir']!r} is outside "
+                    f"the allowed root {self.checkpoint_dir!r}"
+                )
+        else:
             task.payload["checkpoint_dir"] = self.checkpoint_dir
 
     def after_task_success(self, task: TaskRecord, result: dict) -> None:
         # Log checkpoint info if handler returned it
         if "checkpoint_path" in result:
-            print(f"[Checkpoint Hook] Saved: {result['checkpoint_path']}")
+            _log.info("checkpoint_saved", extra={
+                "task_key": task.task_key, "checkpoint_path": result["checkpoint_path"],
+            })
 
 
 @dataclass
 class MetricsHook:
-    """Collect and aggregate metrics across tasks."""
+    """Collect and aggregate metrics across tasks.
+
+    Writes are guarded by both an in-process ``threading.Lock`` and an inter-process
+    ``fcntl`` advisory lock, so concurrent workers (threads or separate processes)
+    cannot interleave JSONL lines. The file lock is acquired with ``LOCK_NB`` and
+    retried until ``lock_timeout_seconds`` so a dead process holding the lock on a
+    networked filesystem (NFS) fails loudly with TimeoutError instead of blocking
+    the worker forever.
+    """
 
     output_file: str = ".finetuneharness/metrics.jsonl"
+    lock_timeout_seconds: float = 10.0
 
     def __post_init__(self):
         self._metrics: list[dict] = []
         self._lock = threading.Lock()
         Path(self.output_file).parent.mkdir(parents=True, exist_ok=True)
+
+    def _acquire_file_lock(self, f) -> None:
+        """Acquire an exclusive advisory lock, retrying until the timeout.
+
+        Raises TimeoutError rather than blocking indefinitely (the LOCK_EX-only
+        path could hang forever if a crashed process on NFS still holds the lock).
+        """
+        deadline = time.monotonic() + self.lock_timeout_seconds
+        while True:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"MetricsHook could not acquire file lock on {self.output_file!r} "
+                        f"within {self.lock_timeout_seconds}s — another process may hold it"
+                    )
+                time.sleep(0.02)
 
     def after_task_success(self, task: TaskRecord, result: dict) -> None:
         metric_entry = {
@@ -127,9 +175,12 @@ class MetricsHook:
         with self._lock:
             self._metrics.append(metric_entry)
             with open(self.output_file, "a") as f:
-                import json
-
-                f.write(json.dumps(metric_entry) + "\n")
+                self._acquire_file_lock(f)
+                try:
+                    f.write(json.dumps(metric_entry) + "\n")
+                    f.flush()
+                finally:
+                    fcntl.flock(f, fcntl.LOCK_UN)
 
     def get_summary(self) -> dict[str, Any]:
         with self._lock:
@@ -191,7 +242,10 @@ class EarlyStoppingHook:
                 self._counter += 1
                 if self._counter >= self.patience:
                     self._should_stop = True
-                    print(f"[EarlyStopping] No improvement in {self.metric} for {self.patience} tasks. Best: {self._best:.4f}")
+                    _log.warning("early_stopping_triggered", extra={
+                        "metric": self.metric, "patience": self.patience,
+                        "best": self._best, "task_key": task.task_key,
+                    })
 
     def should_stop(self) -> bool:
         with self._lock:
@@ -236,10 +290,15 @@ class CleanupHook:
 
 @dataclass
 class ProgressHook:
-    """Log progress and ETA for long-running grids."""
+    """Log progress and ETA for long-running grids.
+
+    Set ``total_tasks`` to enable percent-complete and ETA in the progress log.
+    Without it, only completed-count and throughput are reported (the hook has no
+    other way to know the grid size).
+    """
 
     log_every: int = 1
-    show_eta: bool = True
+    total_tasks: int | None = None
 
     def __post_init__(self):
         self._completed = 0
@@ -249,7 +308,10 @@ class ProgressHook:
     def on_run_status_changed(self, run_id: str, status: RunStatus) -> None:
         if status == RunStatus.COMPLETED:
             elapsed = time.time() - self._start_time
-            print(f"[Progress] Run {run_id[:8]} completed in {elapsed:.1f}s ({self._completed} tasks)")
+            _log.info("run_completed", extra={
+                "run_id": run_id, "elapsed_seconds": round(elapsed, 1),
+                "tasks_completed": self._completed,
+            })
 
     def after_task_success(self, task: TaskRecord, result: dict) -> None:
         with self._lock:
@@ -257,11 +319,20 @@ class ProgressHook:
             if self._completed % self.log_every == 0:
                 elapsed = time.time() - self._start_time
                 rate = self._completed / elapsed if elapsed > 0 else 0
-                msg = f"[Progress] Completed {self._completed} tasks ({rate:.2f} tasks/s)"
-                if self.show_eta and rate > 0:
-                    # Note: we don't know total tasks here without store access
-                    msg += f" - {elapsed:.0f}s elapsed"
-                print(msg)
+                extra: dict[str, Any] = {
+                    "tasks_completed": self._completed,
+                    "rate_per_second": round(rate, 3),
+                    "elapsed_seconds": round(elapsed, 1),
+                }
+                if self.total_tasks:
+                    remaining = max(0, self.total_tasks - self._completed)
+                    extra["total_tasks"] = self.total_tasks
+                    extra["percent_complete"] = round(
+                        100 * self._completed / self.total_tasks, 1
+                    )
+                    if rate > 0:
+                        extra["eta_seconds"] = round(remaining / rate, 1)
+                _log.info("progress", extra=extra)
 
 
 def register_default_hooks(

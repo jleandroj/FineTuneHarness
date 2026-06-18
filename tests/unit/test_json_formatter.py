@@ -262,3 +262,25 @@ class TestJsonFormatterSensitiveRedaction:
         record = _make_record(extra={"api_key": "real-key"})
         payload = json.loads(formatter.format(record))
         assert "api_key" in payload, "sensitive key must appear in output (as [REDACTED])"
+
+    def test_password_abbreviations_redacted(self):
+        """Common password abbreviations (root_pass, db_pass, …) must be redacted."""
+        formatter = JsonFormatter()
+        for key in ("root_pass", "db_pass", "user_pass", "admin_pass", "passwd", "passphrase"):
+            record = _make_record(extra={key: "topsecret"})
+            payload = json.loads(formatter.format(record))
+            assert payload[key] == "[REDACTED]", f"key {key!r} not redacted"
+            assert "topsecret" not in json.dumps(payload)
+
+    def test_pass_rate_metric_not_falsely_redacted(self):
+        """ML metric names containing 'pass' must NOT be redacted (no bare 'pass' word).
+
+        pass_rate and pass@k are legitimate metric names — redacting them would
+        corrupt experiment logs. This locks in the deliberate design choice to
+        avoid the bare 'pass' segment in _SENSITIVE_WORDS.
+        """
+        formatter = JsonFormatter()
+        record = _make_record(extra={"pass_rate": 0.87, "passing": 12})
+        payload = json.loads(formatter.format(record))
+        assert payload["pass_rate"] == 0.87, "pass_rate metric was falsely redacted"
+        assert payload["passing"] == 12, "passing was falsely redacted"

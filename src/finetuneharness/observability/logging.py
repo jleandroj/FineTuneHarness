@@ -25,12 +25,19 @@ _BUILTIN_ATTRS: frozenset[str] = frozenset({
 #                       without false-positives like "author" (segment "author" ≠ "auth").
 #   _SENSITIVE_FULL_KEYS — exact full-key matches for compound names that cannot
 #                          be caught by single-word segments (e.g. "api_key").
+#
+# Note on "pass": we deliberately do NOT add the bare segment "pass" to
+# _SENSITIVE_WORDS — it would false-positive on legitimate ML metric names like
+# "pass_rate" or "pass@k". Instead we add the unambiguous words "passwd"/
+# "passphrase" and enumerate common password abbreviations as full keys below.
 _SENSITIVE_WORDS: frozenset[str] = frozenset({
-    "token", "secret", "password", "credential", "auth",
+    "token", "secret", "password", "passwd", "passphrase",
+    "credential", "credentials", "auth",
 })
 _SENSITIVE_FULL_KEYS: frozenset[str] = frozenset({
     "api_key", "apikey", "private_key", "access_key",
     "auth_key", "auth_token", "bearer_token", "oauth_token",
+    "root_pass", "db_pass", "user_pass", "admin_pass",
 })
 
 _REDACTED = "[REDACTED]"

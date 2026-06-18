@@ -20,10 +20,13 @@ def capture_env_snapshot() -> dict[str, Any]:
         "platform": platform.platform(),
     }
 
+    # Narrow except: only PackageNotFoundError (editable/uninstalled package) maps
+    # to "dev". Any other error from importlib.metadata is unexpected and should
+    # surface rather than be silently masked as a version of "dev".
+    from importlib.metadata import version as _meta_version, PackageNotFoundError
     try:
-        from importlib.metadata import version as _meta_version, PackageNotFoundError
         snap["harness_version"] = _meta_version("finetuneharness")
-    except Exception:
+    except PackageNotFoundError:
         snap["harness_version"] = "dev"
 
     snap["packages"] = _installed_packages([

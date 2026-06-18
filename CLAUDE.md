@@ -65,6 +65,24 @@ tests/unit/      — 42 tests
 - Timeout is preemptive via ThreadPoolExecutor
 - Hooks fire at: before_task, after_task_success, after_task_failure, after_task_timeout, on_run_status_changed
 
+### Two validation routes (they are NOT equivalent)
+
+Input/output validation happens in two distinct places with different contracts:
+
+1. **Schema validation** — `SkillRegistry.validate_input/validate_output`. Enforces
+   *presence and type* of every key in the skill's `input_schema`/`output_schema`
+   (e.g. `model_name` is required because it is in `COMMON_INPUT_SCHEMA`). Only runs
+   when a task goes through `registry.execute(...)`.
+2. **Custom validation** — the `validate_input`/`validate_output` callables on a
+   `SkillSpec` (e.g. `validate_common_input`). Enforces *ranges and semantics*
+   (`epochs > 0`, `accuracy in [0,1]`). The common validators do NOT re-require
+   `model_name`; they assume schema validation already checked presence.
+
+Consequence: a handler invoked directly through the worker (`worker.run_once`) does
+NOT pass through schema validation, so `model_name` presence is only guaranteed on
+the `registry.execute` path. Domain-specific checks (k-mer `k`, `max_per_species`)
+live in `skills/biology/validators.py`, never in the generic core.
+
 ## Hard rules
 
 - Do NOT skip the state machine — always go through the worker, never call update_task_status directly from PENDING

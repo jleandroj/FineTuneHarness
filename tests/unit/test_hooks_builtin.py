@@ -89,6 +89,31 @@ class TestCheckpointHook:
             hook.before_task(task)
             assert task.payload.get("checkpoint_dir") == str(ckpt_dir)
 
+    def test_path_traversal_in_payload_rejected(self, tmp_path):
+        """checkpoint_dir from payload must not escape the hook's allowed root."""
+        ckpt_root = tmp_path / "checkpoints"
+        hook = CheckpointHook(checkpoint_dir=str(ckpt_root))
+        task = TaskRecord(
+            task_id="t1", run_id="r1", task_key="k",
+            status=TaskStatus.PENDING,
+            payload={"checkpoint_dir": str(tmp_path / "checkpoints" / ".." / ".." / "etc")},
+        )
+        with pytest.raises(ValueError, match="outside the allowed root"):
+            hook.before_task(task)
+
+    def test_subdirectory_in_payload_allowed(self, tmp_path):
+        """A checkpoint_dir that is a subdirectory of the root must pass."""
+        ckpt_root = tmp_path / "checkpoints"
+        hook = CheckpointHook(checkpoint_dir=str(ckpt_root))
+        subdir = str(ckpt_root / "epoch_5")
+        task = TaskRecord(
+            task_id="t1", run_id="r1", task_key="k",
+            status=TaskStatus.PENDING,
+            payload={"checkpoint_dir": subdir},
+        )
+        hook.before_task(task)  # must not raise
+        assert task.payload["checkpoint_dir"] == subdir
+
     def test_checkpoint_hook_does_not_mutate_store_payload(self, tmp_path):
         """before_task injection must not leak into the canonical store record.
 
@@ -216,6 +241,47 @@ class TestMetricsHook:
             assert "stdev" in summary["accuracy"]
 
 
+    def test_concurrent_writes_produce_valid_jsonl(self, tmp_path):
+        """Concurrent calls from multiple threads must not corrupt metrics.jsonl.
+
+        Before the fix, open(..., "a") without flock allowed interleaved writes
+        when multiple worker threads hit after_task_success simultaneously, producing
+        partial JSON lines that fail to parse.
+        """
+        import json
+        import threading
+
+        metrics_file = tmp_path / "metrics.jsonl"
+        hook = MetricsHook(output_file=str(metrics_file))
+        n_threads = 20
+        errors: list[Exception] = []
+
+        def write_metric(i: int) -> None:
+            task = TaskRecord(
+                task_id=f"t-{i}", run_id="run-1", task_key=f"task-{i}",
+                status=TaskStatus.PENDING, payload={},
+            )
+            try:
+                hook.after_task_success(task, {"accuracy": round(0.5 + i * 0.01, 4)})
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=write_metric, args=(i,)) for i in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"threads raised: {errors}"
+
+        lines = metrics_file.read_text().strip().splitlines()
+        assert len(lines) == n_threads, f"expected {n_threads} lines, got {len(lines)}"
+        for i, line in enumerate(lines):
+            parsed = json.loads(line)  # raises if line is partial/corrupt
+            assert "task_key" in parsed
+            assert "accuracy" in parsed
+
+
 class TestEarlyStoppingHook:
     def test_no_improvement_triggers_stop(self):
         hook = EarlyStoppingHook(metric="accuracy", patience=3, min_delta=0.01)
@@ -277,6 +343,59 @@ class TestProgressHook:
     def test_on_run_status_changed_completed(self):
         hook = ProgressHook()
         hook.on_run_status_changed("run-1", RunStatus.COMPLETED)  # Should not raise
+
+    def test_total_tasks_emits_percent_and_eta(self):
+        """With total_tasks set, the progress log includes percent_complete and eta_seconds."""
+        import logging
+
+        records: list[logging.LogRecord] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        hook = ProgressHook(log_every=1, total_tasks=4)
+        logger = logging.getLogger("finetuneharness.hooks")
+        handler = _Capture()
+        logger.addHandler(handler)
+        try:
+            task = TaskRecord(task_id="1", run_id="r", task_key="t1",
+                              status=TaskStatus.PENDING, payload={})
+            hook.after_task_success(task, {})
+        finally:
+            logger.removeHandler(handler)
+
+        progress = [r for r in records if r.getMessage() == "progress"]
+        assert progress, "no progress log emitted"
+        rec = progress[-1]
+        assert rec.total_tasks == 4
+        assert rec.percent_complete == 25.0
+        assert hasattr(rec, "eta_seconds")
+
+    def test_no_total_tasks_omits_percent(self):
+        """Without total_tasks, percent_complete/eta must be absent (can't be computed)."""
+        import logging
+
+        records: list[logging.LogRecord] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        hook = ProgressHook(log_every=1)
+        logger = logging.getLogger("finetuneharness.hooks")
+        handler = _Capture()
+        logger.addHandler(handler)
+        try:
+            task = TaskRecord(task_id="1", run_id="r", task_key="t1",
+                              status=TaskStatus.PENDING, payload={})
+            hook.after_task_success(task, {})
+        finally:
+            logger.removeHandler(handler)
+
+        progress = [r for r in records if r.getMessage() == "progress"]
+        assert progress
+        assert not hasattr(progress[-1], "percent_complete")
 
 
 class TestRegisterDefaultHooks:

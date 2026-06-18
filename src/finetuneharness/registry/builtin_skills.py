@@ -1,6 +1,10 @@
 """Built-in fine-tuning skills for FineTuneHarness.
 
-These 12 techniques correspond to the ablation grid in promoter_species_id:
+Generic SkillSpec definitions for 12 fine-tuning techniques. Each spec declares
+the input/output schema and a stub handler; the real implementation is injected
+at runtime via TaskDispatcher.register().
+
+Techniques:
 - sft: Full fine-tuning
 - lora: LoRA (Low-Rank Adaptation)
 - adalora: AdaLoRA (adaptive rank allocation)
@@ -25,10 +29,8 @@ from finetuneharness.registry import SkillSpec
 
 # Common input schema for all fine-tuning skills
 COMMON_INPUT_SCHEMA: dict[str, type] = {
-    "k": int,  # k-mer size (1-6)
-    "technique": str,  # technique name
+    "technique": str,
     "epochs": int,
-    "max_per_species": int,
     "learning_rate": float,
     "batch_size": int,
     "max_length": int,
@@ -45,7 +47,6 @@ COMMON_OUTPUT_SCHEMA: dict[str, type] = {
     "n_params": int,
     "wall_seconds": float,
     "technique": str,
-    "k": int,
 }
 
 
@@ -53,26 +54,36 @@ def _make_common_validators():
     """Create common input/output validators."""
 
     def validate_common_input(payload: dict[str, Any]) -> None:
-        if not (1 <= payload.get("k", 0) <= 6):
-            raise ValueError("k must be between 1 and 6")
-        if payload.get("epochs", 0) <= 0:
-            raise ValueError("epochs must be positive")
-        if payload.get("max_per_species", 0) <= 0:
-            raise ValueError("max_per_species must be positive")
-        if payload.get("learning_rate", 0) <= 0:
-            raise ValueError("learning_rate must be positive")
-        if payload.get("batch_size", 0) <= 0:
-            raise ValueError("batch_size must be positive")
-        if payload.get("max_length", 0) <= 0:
-            raise ValueError("max_length must be positive")
+        required = ("epochs", "learning_rate", "batch_size", "max_length")
+        for field in required:
+            if field not in payload:
+                raise ValueError(f"{field} is required")
+        if payload["epochs"] <= 0:
+            raise ValueError(f"epochs must be positive, got {payload['epochs']}")
+        if payload["learning_rate"] <= 0:
+            raise ValueError(f"learning_rate must be positive, got {payload['learning_rate']}")
+        if payload["batch_size"] <= 0:
+            raise ValueError(f"batch_size must be positive, got {payload['batch_size']}")
+        if payload["max_length"] <= 0:
+            raise ValueError(f"max_length must be positive, got {payload['max_length']}")
 
     def validate_common_output(result: dict[str, Any]) -> None:
-        acc = result.get("accuracy", -1)
-        if not (0 <= acc <= 1):
-            raise ValueError(f"accuracy must be in [0, 1], got {acc}")
-        f1 = result.get("f1", -1)
-        if not (0 <= f1 <= 1):
-            raise ValueError(f"f1 must be in [0, 1], got {f1}")
+        for field in ("accuracy", "f1", "precision", "recall", "auc"):
+            if field in result:
+                v = result[field]
+                if not (0 <= v <= 1):
+                    raise ValueError(f"{field} must be in [0, 1], got {v}")
+        if "n_params" in result:
+            if not (isinstance(result["n_params"], int) and result["n_params"] > 0):
+                raise ValueError(f"n_params must be a positive int, got {result['n_params']}")
+        if "wall_seconds" in result:
+            if result["wall_seconds"] < 0:
+                raise ValueError(f"wall_seconds must be >= 0, got {result['wall_seconds']}")
+        if "technique" in result:
+            if not isinstance(result["technique"], str) or not result["technique"].strip():
+                raise ValueError(f"technique must be a non-empty string, got {result['technique']!r}")
+        # Note: 'k' (k-mer size) is a biology-domain field — its range check lives
+        # in skills/biology/validators.py:validate_bio_output, not in the generic core.
 
     return validate_common_input, validate_common_output
 

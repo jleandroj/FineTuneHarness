@@ -14,11 +14,22 @@ def apply_seed(seed: int) -> None:
 
     Applied sources (in order):
       1. Python built-in ``random``
-      2. ``numpy.random`` (if numpy is importable)
+      2. ``numpy.random`` legacy global RNG (if numpy is importable)
       3. ``torch`` CPU + CUDA (if torch is importable)
       4. ``CUBLAS_WORKSPACE_CONFIG`` env var — set to ``:4096:8`` if not already
          present, so cuBLAS uses a deterministic workspace algorithm the next
          time a cuBLAS workspace is created.
+
+    **Known limitations (handlers must seed these explicitly):**
+
+    *numpy.random.default_rng()*: ``np.random.seed()`` only seeds the *legacy*
+    numpy global RNG. Handlers that call ``np.random.default_rng()`` without an
+    explicit seed receive an independent, unseeded Generator.
+    Fix: ``rng = np.random.default_rng(task.payload["seed"])``
+
+    *JAX*: JAX uses explicit functional PRNG keys — there is no global state to
+    seed. ``apply_seed`` does not import or affect JAX.
+    Fix: ``key = jax.random.PRNGKey(task.payload["seed"])`` inside the handler.
 
     Note on CUBLAS_WORKSPACE_CONFIG: the variable is read when the cuBLAS
     workspace is first allocated per-stream, not at CUDA init. Setting it here,
