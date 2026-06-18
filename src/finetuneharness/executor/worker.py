@@ -83,10 +83,13 @@ class LocalWorker:
             max_workers=max_workers, thread_name_prefix=f"worker-{worker_id}"
         )
         self._started_runs: set[str] = set()
+        self._run_seeds: dict[str, int | None] = {}
 
     def run_once(self, *, run_id: str, handler: TaskHandler) -> TaskRecord | None:
         if run_id not in self._started_runs:
             self._started_runs.add(run_id)
+            _run = self._store.get_run(run_id)
+            self._run_seeds[run_id] = _run.seed if _run is not None else None
             self._hooks.fire("before_run_start", run_id=run_id)
 
         task = self._scheduler.lease_next_task(run_id=run_id, worker_id=self.worker_id)
@@ -109,9 +112,10 @@ class LocalWorker:
 
         # Apply seed before hooks and handler so every participant sees a
         # reproducible RNG state from the start of the task.
-        _run = self._store.get_run(run_id)
-        if _run is not None and _run.seed is not None:
-            apply_seed(_run.seed)
+        # Seed is cached at run-start (one get_run per run, not per task).
+        _seed = self._run_seeds.get(run_id)
+        if _seed is not None:
+            apply_seed(_seed)
 
         # Give hooks and handler a shallow payload copy so before_task mutations
         # (e.g. CheckpointHook injecting checkpoint_dir) never touch the

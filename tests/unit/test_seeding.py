@@ -160,6 +160,55 @@ def test_worker_different_seeds_produce_different_random_state():
 
 # ── Q5 bug fix: comparability uses dataset_hashes field ──────────────────────
 
+def test_seed_cached_per_run_not_per_task():
+    """Seed must be read once at run-start (cached), not once per task.
+
+    get_run is called by both the seed logic and refresh_run_status. The count
+    we care about:
+      - With seed cache:    1 (run-start) + 2*N (refresh × 2 per task) = 2N+1
+      - Without seed cache: N (per-task seed) + 2*N (refresh) = 3N
+
+    For a 72-cell grid: 145 vs 216 queries — 71 wasted round-trips eliminated.
+    """
+    from unittest.mock import patch
+    from finetuneharness.executor.worker import LocalWorker
+
+    N = 5
+    store = InMemoryStateStore()
+    runner = FineTuneRunner(store)
+
+    run_id = runner.create_run(
+        name="r", config=_BASE_CONFIG,
+        tasks=[{"task_key": f"t{i}"} for i in range(N)],
+    )
+
+    worker = LocalWorker(worker_id="w", store=store, runner=runner)
+
+    get_run_calls: list[str] = []
+    real_get_run = store.get_run
+
+    def spy_get_run(rid):
+        get_run_calls.append(rid)
+        return real_get_run(rid)
+
+    with patch.object(store, "get_run", side_effect=spy_get_run):
+        worker.drain(run_id=run_id, handler=lambda t: {})
+
+    total = len([r for r in get_run_calls if r == run_id])
+    cached_max = 2 * N + 1   # 1 seed-cache + 2 refresh_run_status per task
+    uncached   = 3 * N       # N seed per-task + 2 refresh_run_status per task
+    assert total <= cached_max, (
+        f"get_run called {total} times — expected ≤{cached_max} (seed cached). "
+        f"Without cache it would be {uncached}. "
+        f"Each call over {cached_max} is a per-task seed re-read regression."
+    )
+
+    # Also verify the cache itself holds the correct seed
+    assert worker._run_seeds.get(run_id) == _BASE_CONFIG["seed"], (
+        "Seed was not cached or wrong value in _run_seeds"
+    )
+
+
 def test_comparability_detects_mismatch_via_datasets_dict_form():
     """Runs created with the 'datasets' dict form (not 'dataset_hash') should
     still trigger a dataset_hashes ERROR if the data differs."""
