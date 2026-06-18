@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -49,9 +50,19 @@ class ComparisonReport:
 
 
 def _numeric_metrics(result: dict[str, Any] | None) -> dict[str, float]:
+    """Extract finite numeric metrics from a result dict.
+
+    NaN and Inf are excluded: they would corrupt deltas and comparisons silently.
+    """
     if result is None:
         return {}
-    return {k: float(v) for k, v in result.items() if isinstance(v, (int, float))}
+    out: dict[str, float] = {}
+    for k, v in result.items():
+        if isinstance(v, (int, float)):
+            fv = float(v)
+            if math.isfinite(fv):
+                out[k] = fv
+    return out
 
 
 def compare_runs(run_ids: list[str], store: StateStore) -> ComparisonReport:
