@@ -20,6 +20,12 @@ def capture_env_snapshot() -> dict[str, Any]:
         "platform": platform.platform(),
     }
 
+    try:
+        from importlib.metadata import version as _meta_version, PackageNotFoundError
+        snap["harness_version"] = _meta_version("finetuneharness")
+    except Exception:
+        snap["harness_version"] = "dev"
+
     snap["packages"] = _installed_packages([
         # Core ML
         "torch", "torchvision", "torchaudio",

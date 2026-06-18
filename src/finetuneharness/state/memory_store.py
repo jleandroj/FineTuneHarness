@@ -82,12 +82,19 @@ class InMemoryStateStore(StateStore):
             )
 
     def lease_next_pending_task(self, *, run_id: str, worker_id: str, lease_seconds: int) -> TaskRecord | None:
+        now = utc_now()
         with self._lock:
             for task in sorted(
                 [t for t in self._tasks.values() if t.run_id == run_id],
                 key=lambda t: t.task_key,
             ):
-                if task.status is TaskStatus.PENDING:
+                # Claim PENDING tasks, or LEASED tasks whose lease has expired —
+                # matching SQLiteStore's SELECT … OR (status=LEASED AND leased_until < now).
+                if task.status is TaskStatus.PENDING or (
+                    task.status is TaskStatus.LEASED
+                    and task.leased_until is not None
+                    and task.leased_until <= now
+                ):
                     lease = Lease.from_seconds(worker_id, lease_seconds)
                     leased = replace(task, status=TaskStatus.LEASED, lease_owner=worker_id, leased_until=lease.leased_until)
                     self._tasks[task.task_id] = leased

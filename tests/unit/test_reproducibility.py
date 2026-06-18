@@ -213,3 +213,43 @@ def test_create_run_config_hash_is_set():
     run = store.get_run(run_id)
     assert run.config_hash is not None
     assert len(run.config_hash) == 64  # SHA-256 hex = 64 chars
+
+
+# ── harness_version in env_snapshot (P2) ─────────────────────────────────────
+
+def test_env_snapshot_contains_harness_version():
+    """harness_version must appear at the top level of the env snapshot.
+
+    A snapshot without this field makes it impossible to know which version of
+    the harness produced a historical run, breaking reproducibility audits.
+    """
+    from finetuneharness.state.env_snapshot import capture_env_snapshot
+
+    snap = capture_env_snapshot()
+    assert "harness_version" in snap, (
+        "env snapshot is missing 'harness_version' — "
+        "historical runs cannot be traced back to a harness release"
+    )
+    # Value must be a non-empty string: a semver ("1.2.3") or "dev" for editable installs
+    v = snap["harness_version"]
+    assert isinstance(v, str) and v, f"harness_version must be a non-empty string, got {v!r}"
+
+
+def test_env_snapshot_harness_version_survives_package_not_found(monkeypatch):
+    """When finetuneharness is not installed as a package, harness_version must be 'dev'."""
+    import importlib.metadata
+    from finetuneharness.state.env_snapshot import capture_env_snapshot
+
+    original_version = importlib.metadata.version
+
+    def _raise_for_harness(name):
+        if name == "finetuneharness":
+            raise importlib.metadata.PackageNotFoundError(name)
+        return original_version(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", _raise_for_harness)
+    snap = capture_env_snapshot()
+
+    assert snap["harness_version"] == "dev", (
+        "harness_version must fall back to 'dev' when the package is not installed"
+    )

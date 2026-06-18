@@ -123,37 +123,61 @@ class SkillRegistry:
         return result
 
 
-# Global registry instance
-_registry = SkillRegistry()
+# Process-wide mutable registry — name signals global scope explicitly.
+# Tests should pass a local SkillRegistry() via the registry= parameter to
+# avoid mutating this singleton and interfering with parallel test workers.
+_GLOBAL_REGISTRY = SkillRegistry()
 
 
-def register_builtin_skills() -> None:
-    """Register the 12 built-in fine-tuning techniques from promoter_species_id."""
+def register_builtin_skills(registry: SkillRegistry | None = None) -> None:
+    """Register the 12 built-in fine-tuning techniques.
+
+    Idempotent: already-registered skills are silently skipped.
+    Pass a SkillRegistry instance to register into a local registry instead of
+    the global singleton (useful for test isolation).
+    """
     from finetuneharness.registry.builtin_skills import BUILTIN_SKILLS
 
+    _reg = registry if registry is not None else _GLOBAL_REGISTRY
+    existing = set(_reg.list_skills())
     for spec in BUILTIN_SKILLS:
-        _registry.register(spec)
+        if spec.name not in existing:
+            _reg.register(spec)
 
 
-def get_skill(name: str) -> SkillSpec | None:
+def get_skill(name: str, registry: SkillRegistry | None = None) -> SkillSpec | None:
     """Get a built-in skill by name."""
-    if not _registry.list_skills():
-        register_builtin_skills()
-    return _registry.get(name)
+    _reg = registry if registry is not None else _GLOBAL_REGISTRY
+    if not _reg.list_skills():
+        register_builtin_skills(_reg)
+    return _reg.get(name)
 
 
-def list_skills() -> list[str]:
+def list_skills(registry: SkillRegistry | None = None) -> list[str]:
     """List all registered skills."""
-    if not _registry.list_skills():
-        register_builtin_skills()
-    return _registry.list_skills()
+    _reg = registry if registry is not None else _GLOBAL_REGISTRY
+    if not _reg.list_skills():
+        register_builtin_skills(_reg)
+    return _reg.list_skills()
 
 
-def execute_skill(skill_name: str, task_record, **kwargs) -> dict[str, Any]:
+def execute_skill(skill_name: str, task_record, *, registry: SkillRegistry | None = None, **kwargs) -> dict[str, Any]:
     """Execute a skill with validation."""
-    if not _registry.list_skills():
-        register_builtin_skills()
-    return _registry.execute(skill_name, task_record, **kwargs)
+    _reg = registry if registry is not None else _GLOBAL_REGISTRY
+    if not _reg.list_skills():
+        register_builtin_skills(_reg)
+    return _reg.execute(skill_name, task_record, **kwargs)
+
+
+def _reset_global_registry() -> None:
+    """Replace the global registry with a fresh empty instance.
+
+    For test isolation only — do not call in production code.
+    After this call, the lazy-init in get_skill/list_skills will re-register
+    builtins on next access.
+    """
+    global _GLOBAL_REGISTRY
+    _GLOBAL_REGISTRY = SkillRegistry()
 
 
 from finetuneharness.registry.dispatcher import TaskDispatcher, validate_task_payload
