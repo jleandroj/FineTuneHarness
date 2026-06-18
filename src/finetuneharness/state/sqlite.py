@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,10 +41,14 @@ class SQLiteStateStore(StateStore):
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path, timeout=30)
         conn.row_factory = sqlite3.Row
+        # foreign_keys is a per-connection PRAGMA (defaults OFF). Without this,
+        # the ON DELETE CASCADE constraints declared in the schema are NOT
+        # enforced on any operational connection.
+        conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
     def _init_db(self) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.executescript(
                 """
                 PRAGMA journal_mode=WAL;
@@ -122,7 +128,7 @@ class SQLiteStateStore(StateStore):
                 conn.execute("ALTER TABLE runs ADD COLUMN config_hash TEXT")
 
     def create_run(self, run: RunRecord) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.execute(
                 "INSERT INTO runs"
                 " (run_id, name, status, config_json, created_at, env_snapshot_json, finished_at,"
@@ -143,7 +149,7 @@ class SQLiteStateStore(StateStore):
             )
 
     def update_run_finished_at(self, run_id: str, finished_at: datetime) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             cur = conn.execute(
                 "UPDATE runs SET finished_at = ? WHERE run_id = ?",
                 (finished_at.isoformat(), run_id),
@@ -152,13 +158,13 @@ class SQLiteStateStore(StateStore):
                 raise KeyError(f"unknown run_id: {run_id}")
 
     def update_run_status(self, run_id: str, status: RunStatus) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             cur = conn.execute("UPDATE runs SET status = ? WHERE run_id = ?", (status.value, run_id))
             if cur.rowcount != 1:
                 raise KeyError(f"unknown run_id: {run_id}")
 
     def get_run(self, run_id: str) -> RunRecord | None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             row = conn.execute(
                 "SELECT run_id, name, status, config_json, created_at, env_snapshot_json, finished_at,"
                 "       seed, dataset_hashes_json, config_hash"
@@ -170,7 +176,7 @@ class SQLiteStateStore(StateStore):
         return _row_to_run(row)
 
     def list_runs(self) -> list[RunRecord]:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 "SELECT run_id, name, status, config_json, created_at, env_snapshot_json, finished_at,"
                 "       seed, dataset_hashes_json, config_hash"
@@ -179,7 +185,7 @@ class SQLiteStateStore(StateStore):
         return [_row_to_run(row) for row in rows]
 
     def create_task(self, task: TaskRecord) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.execute(
                 """
                 INSERT INTO tasks (task_id, run_id, task_key, status, payload_json, result_json, error, lease_owner, leased_until, attempt_count)
@@ -207,7 +213,7 @@ class SQLiteStateStore(StateStore):
         result: dict[str, object] | None = None,
         error: str | None = None,
     ) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT status FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
             if row is None:
@@ -226,7 +232,7 @@ class SQLiteStateStore(StateStore):
                 raise KeyError(f"unknown task_id: {task_id}")
 
     def list_tasks(self, run_id: str) -> list[TaskRecord]:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 """
                 SELECT task_id, run_id, task_key, status, payload_json, result_json, error, lease_owner, leased_until, attempt_count
@@ -253,7 +259,7 @@ class SQLiteStateStore(StateStore):
     def lease_next_pending_task(self, *, run_id: str, worker_id: str, lease_seconds: int) -> TaskRecord | None:
         now = utc_now()
         lease = Lease.from_seconds(worker_id, lease_seconds)
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
@@ -293,7 +299,7 @@ class SQLiteStateStore(StateStore):
         )
 
     def mark_task_running(self, task_id: str) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             cur = conn.execute(
                 "UPDATE tasks SET status = ? WHERE task_id = ? AND status = ?",
                 (TaskStatus.RUNNING.value, task_id, TaskStatus.LEASED.value),
@@ -302,7 +308,7 @@ class SQLiteStateStore(StateStore):
                 raise KeyError(f"task is not leaseable/running-ready: {task_id}")
 
     def increment_task_attempts(self, task_id: str) -> int:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             cur = conn.execute(
                 "UPDATE tasks SET attempt_count = attempt_count + 1 WHERE task_id = ?",
                 (task_id,),
@@ -316,8 +322,18 @@ class SQLiteStateStore(StateStore):
 
     def requeue_expired_leases(self, *, run_id: str) -> int:
         now = utc_now().isoformat()
-        with self._connect() as conn:
-            cur = conn.execute(
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            expired = conn.execute(
+                """
+                SELECT task_id, lease_owner FROM tasks
+                WHERE run_id = ? AND status = ? AND leased_until IS NOT NULL AND leased_until < ?
+                """,
+                (run_id, TaskStatus.LEASED.value, now),
+            ).fetchall()
+            if not expired:
+                return 0
+            conn.execute(
                 """
                 UPDATE tasks
                 SET status = ?, lease_owner = NULL, leased_until = NULL
@@ -325,10 +341,21 @@ class SQLiteStateStore(StateStore):
                 """,
                 (TaskStatus.PENDING.value, run_id, TaskStatus.LEASED.value, now),
             )
-            return int(cur.rowcount)
+            # Emit an audit event per reclaimed lease so silent recovery is visible.
+            for row in expired:
+                conn.execute(
+                    "INSERT INTO events (event_id, run_id, task_id, kind, payload_json, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        uuid.uuid4().hex, run_id, row["task_id"], "lease_expired",
+                        json.dumps({"previous_owner": row["lease_owner"]}, sort_keys=True),
+                        utc_now().isoformat(),
+                    ),
+                )
+            return len(expired)
 
     def append_event(self, event: EventRecord) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.execute(
                 "INSERT INTO events (event_id, run_id, task_id, kind, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (
@@ -342,7 +369,7 @@ class SQLiteStateStore(StateStore):
             )
 
     def create_artifact(self, artifact: ArtifactRecord) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.execute(
                 "INSERT INTO artifacts (artifact_id, run_id, task_id, kind, path, checksum) VALUES (?, ?, ?, ?, ?, ?)",
                 (
@@ -356,7 +383,7 @@ class SQLiteStateStore(StateStore):
             )
 
     def list_artifacts(self, run_id: str) -> list[ArtifactRecord]:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 "SELECT artifact_id, run_id, task_id, kind, path, checksum FROM artifacts WHERE run_id = ? ORDER BY rowid",
                 (run_id,),
@@ -374,7 +401,7 @@ class SQLiteStateStore(StateStore):
         ]
 
     def list_events(self, run_id: str) -> list[EventRecord]:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 "SELECT event_id, run_id, task_id, kind, payload_json, created_at FROM events WHERE run_id = ? ORDER BY rowid",
                 (run_id,),

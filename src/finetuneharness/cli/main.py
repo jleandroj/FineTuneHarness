@@ -11,11 +11,33 @@ from finetuneharness.evaluation.comparator import (
     compare_runs,
 )
 from finetuneharness.evaluation.report import format_report, report_to_dict
+from finetuneharness.executor.worker import DegradedRunError, LocalWorker
 from finetuneharness.orchestrator.approval import ApprovalError, InteractiveApprovalGate
 from finetuneharness.orchestrator.runner import FineTuneRunner
 from finetuneharness.state.memory_store import InMemoryStateStore
 from finetuneharness.state.reproducibility import assess_reproducibility, export_manifest
 from finetuneharness.state.sqlite import SQLiteStateStore
+
+
+def _load_handler(spec: str):
+    """Import a task handler from a 'module:function' spec, e.g. 'mypkg.h:train'."""
+    import importlib
+
+    def _fail(msg: str):
+        print(f"Error: {msg}", flush=True)
+        raise SystemExit(1)
+
+    if ":" not in spec:
+        _fail(f"--handler must be 'module:function', got {spec!r}")
+    module_name, _, func_name = spec.partition(":")
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as exc:
+        _fail(f"could not import handler module {module_name!r}: {exc}")
+    fn = getattr(module, func_name, None)
+    if fn is None or not callable(fn):
+        _fail(f"handler {func_name!r} not found or not callable in {module_name!r}")
+    return fn
 
 
 def main() -> None:
@@ -27,7 +49,20 @@ def main() -> None:
     init_run.add_argument("--config", required=True, help="Path to JSON config file")
     init_run.add_argument("--tasks", required=True, help="Path to JSON task list file")
     init_run.add_argument("--state-db", default=".finetuneharness/state.db", help="SQLite state DB path")
-    init_run.add_argument("--memory", action="store_true", help="Use in-memory store instead of SQLite")
+    init_run.add_argument(
+        "--memory", action="store_true",
+        help="SMOKE-TEST ONLY: use a process-local in-memory store. The run is NOT "
+             "persisted, so the printed run_id cannot be used by any later command.",
+    )
+
+    run_cmd = sub.add_parser("run", help="Execute pending tasks for a run with a handler")
+    run_cmd.add_argument("--run-id", required=True)
+    run_cmd.add_argument("--state-db", default=".finetuneharness/state.db")
+    run_cmd.add_argument(
+        "--handler", required=True, metavar="MODULE:FUNCTION",
+        help="Import path of the task handler, e.g. 'mypkg.handlers:train'",
+    )
+    run_cmd.add_argument("--max-workers", type=int, default=4)
 
     status_cmd = sub.add_parser("status", help="Show run status summary")
     status_cmd.add_argument("--run-id", required=True)
@@ -96,6 +131,18 @@ def main() -> None:
         runner = FineTuneRunner(store)
         run_id = runner.create_run(name=args.name, config=config, tasks=tasks)
         print(run_id)
+        return
+
+    if args.command == "run":
+        store = SQLiteStateStore(Path(args.state_db))
+        handler = _load_handler(args.handler)
+        worker = LocalWorker(worker_id="cli", store=store, max_workers=args.max_workers)
+        try:
+            succeeded = worker.drain(run_id=args.run_id, handler=handler)
+            print(f"Run {args.run_id}: {succeeded} task(s) succeeded")
+        except DegradedRunError as exc:
+            print(str(exc), flush=True)
+            raise SystemExit(1)
         return
 
     if args.command == "status":

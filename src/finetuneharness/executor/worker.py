@@ -46,13 +46,25 @@ class DegradedRunError(Exception):
 
 
 class LocalWorker:
-    """Local worker with preemptive timeout, hooks, and injectable dependencies.
+    """Local worker with best-effort timeout, hooks, and injectable dependencies.
 
-    Timeout is enforced via a shared ThreadPoolExecutor (max_workers=4) that is
-    reused across calls. When a timeout fires the submitted future is abandoned
-    but the underlying thread continues until the handler returns naturally —
-    Python offers no safe way to kill a running thread. The bounded pool ensures
-    at most 4 leaked threads can accumulate simultaneously.
+    Timeout semantics (read carefully — this is NOT preemptive for in-process
+    handlers):
+
+      * The timeout makes the worker *stop waiting* for the handler and move on.
+        It does NOT kill the handler's computation — Python offers no safe way to
+        kill a running thread, so a hung in-process handler keeps consuming
+        CPU/GPU until it returns naturally. Its result is discarded.
+      * Each timed task runs in its OWN single-use ThreadPoolExecutor. A hung
+        handler therefore leaks only its own thread and can NEVER starve later
+        tasks (a previous shared, bounded pool would exhaust after N hangs and
+        falsely mark healthy tasks TIMED_OUT). See _execute.
+      * For TRUE preemption that frees the GPU, run handlers under FirejailSandbox
+        (subprocess) and set a subprocess timeout — a killed process releases its
+        resources. The in-process NoSandbox path cannot do this.
+
+    ``max_workers`` is retained for config compatibility but no longer sizes a
+    shared pool; drain() is sequential, so only one handler runs at a time.
     """
 
     def __init__(
@@ -79,9 +91,10 @@ class LocalWorker:
         self._hooks = hooks or HookRegistry()
         self._sandbox: SandboxPolicy = sandbox or NoSandbox()
         self._log = get_logger("finetuneharness.worker")
-        self._executor = ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix=f"worker-{worker_id}"
-        )
+        # No shared pool: each timed task gets a fresh single-use executor in
+        # _execute so a hung handler cannot starve later tasks. Kept for config
+        # compatibility / introspection only.
+        self._max_workers = max_workers
         self._started_runs: set[str] = set()
         self._run_seeds: dict[str, int | None] = {}
 
@@ -294,11 +307,20 @@ class LocalWorker:
     ) -> dict[str, object]:
         if timeout_seconds is None:
             return self._sandbox.run(handler, task)
-        future = self._executor.submit(self._sandbox.run, handler, task)
+        # Per-task executor: isolates each timed handler so a hung one leaks only
+        # its own thread and never occupies a slot needed by a later task.
+        executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix=f"worker-{self.worker_id}-task"
+        )
+        future = executor.submit(self._sandbox.run, handler, task)
         try:
             return future.result(timeout=timeout_seconds)
         except FuturesTimeoutError:
             raise TimeoutError(f"task exceeded timeout of {timeout_seconds}s")
+        finally:
+            # wait=False: a timed-out handler thread cannot be killed; abandon it
+            # so the worker proceeds immediately to the next task.
+            executor.shutdown(wait=False)
 
     def _resolve_max_attempts(self, task: TaskRecord) -> int:
         raw = task.payload.get("max_attempts", self._retry_policy.max_attempts)

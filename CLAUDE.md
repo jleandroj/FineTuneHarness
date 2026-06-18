@@ -17,6 +17,9 @@ python -m pytest tests/ -v
 
 # CLI — create a run
 finetuneharness create-run --name "my-experiment" --config configs/example.json --tasks configs/tasks.json
+
+# CLI — execute pending tasks with your handler (module:function)
+finetuneharness run --run-id <id> --handler mypkg.handlers:train --max-workers 4
 ```
 
 ## Project layout
@@ -62,7 +65,12 @@ tests/unit/      — 42 tests
 - Tasks have explicit state: PENDING → LEASED → RUNNING → SUCCEEDED/FAILED/TIMED_OUT
 - State machine is enforced — invalid transitions raise ValueError
 - SQLite with WAL + BEGIN IMMEDIATE prevents double-execution under concurrency
-- Timeout is preemptive via ThreadPoolExecutor
+- Timeout is best-effort, NOT preemptive for in-process handlers: it makes the
+  worker stop waiting and move on, but Python cannot kill the handler thread, so a
+  hung in-process handler keeps using CPU/GPU until it returns (its result is
+  discarded). Each timed task runs in its own single-use executor, so a hung
+  handler never starves later tasks. For TRUE preemption that frees the GPU, run
+  under FirejailSandbox (subprocess) with a subprocess timeout.
 - Hooks fire at: before_task, after_task_success, after_task_failure, after_task_timeout, on_run_status_changed
 
 ### Two validation routes (they are NOT equivalent)

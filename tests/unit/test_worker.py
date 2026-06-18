@@ -148,17 +148,23 @@ def test_worker_stamps_degenerate_on_adapter_not_loaded(tmp_path: Path) -> None:
     assert any("adapter_loaded" in e for e in task.result["_validation_errors"])
 
 
-def test_worker_max_workers_passed_to_thread_pool(tmp_path: Path) -> None:
-    """max_workers must be wired through to the ThreadPoolExecutor, not hardcoded."""
+def test_worker_max_workers_accepted_and_stored(tmp_path: Path) -> None:
+    """max_workers is accepted for config compatibility and stored for introspection.
+
+    There is no longer a shared ThreadPoolExecutor — each timed task gets its own
+    single-use executor (see LocalWorker._execute), so a hung handler can't starve
+    later tasks. This test pins the new contract.
+    """
     store, run_id = _make_run(tmp_path, ["t1"])
     worker = LocalWorker(worker_id="w", store=store, max_workers=2)
-    assert worker._executor._max_workers == 2
+    assert worker._max_workers == 2
+    assert not hasattr(worker, "_executor"), "shared pool must be gone (cascade-starvation risk)"
 
 
 def test_worker_default_max_workers_is_4(tmp_path: Path) -> None:
     store, run_id = _make_run(tmp_path, ["t1"])
     worker = LocalWorker(worker_id="w", store=store)
-    assert worker._executor._max_workers == 4
+    assert worker._max_workers == 4
 
 
 def test_drain_stop_fn_halts_after_n_tasks(tmp_path: Path) -> None:

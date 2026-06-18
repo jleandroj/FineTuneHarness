@@ -205,3 +205,51 @@ def test_start_run_denied_exits_1(tmp_path: Path) -> None:
     # expected_exit=1 means _invoke won't raise — just verify the denial message
     output = _invoke("start-run", "--run-id", run_id, "--state-db", db, stdin_data="n\n", expected_exit=1)
     assert "denied" in output.lower() or "Denied" in output
+
+
+# ---------------------------------------------------------------------------
+# run (execute tasks with a handler)
+# ---------------------------------------------------------------------------
+
+def test_run_executes_pending_tasks_end_to_end(tmp_path: Path) -> None:
+    """`run` must drive a created run to COMPLETED using an imported handler."""
+    cfg, tasks = _write_fixtures(tmp_path)
+    db = str(tmp_path / "state.db")
+    run_id = _invoke(
+        "create-run", "--name", "run-exec", "--config", str(cfg),
+        "--tasks", str(tasks), "--state-db", db,
+    ).strip()
+
+    # Write a handler module and make it importable.
+    handler_mod = tmp_path / "cli_handler_mod.py"
+    handler_mod.write_text(
+        "def handle(task):\n"
+        "    return {'accuracy': 0.9, 'f1': 0.88}\n"
+    )
+    sys.path.insert(0, str(tmp_path))
+    try:
+        out = _invoke(
+            "run", "--run-id", run_id, "--state-db", db,
+            "--handler", "cli_handler_mod:handle",
+        )
+        assert "succeeded" in out
+
+        status = json.loads(_invoke("status", "--run-id", run_id, "--state-db", db))
+        assert status["status"].lower() == "completed"
+        succeeded = status["task_counts"].get("succeeded") or status["task_counts"].get("SUCCEEDED")
+        assert succeeded == len(_BASE_TASKS)
+    finally:
+        sys.path.remove(str(tmp_path))
+        sys.modules.pop("cli_handler_mod", None)
+
+
+def test_run_with_bad_handler_spec_exits(tmp_path: Path) -> None:
+    cfg, tasks = _write_fixtures(tmp_path)
+    db = str(tmp_path / "state.db")
+    run_id = _invoke(
+        "create-run", "--name", "bad-h", "--config", str(cfg),
+        "--tasks", str(tasks), "--state-db", db,
+    ).strip()
+    # Missing ':' → SystemExit
+    _invoke("run", "--run-id", run_id, "--state-db", db,
+            "--handler", "not_a_valid_spec", expected_exit=1)

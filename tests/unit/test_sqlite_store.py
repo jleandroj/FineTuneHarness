@@ -127,3 +127,65 @@ def test_in_memory_store_non_expired_lease_not_stolen():
     store.lease_next_pending_task(run_id="run-nexp", worker_id="w1", lease_seconds=3600)
     result = store.lease_next_pending_task(run_id="run-nexp", worker_id="w2", lease_seconds=60)
     assert result is None, "valid (non-expired) lease must not be stolen by another worker"
+
+
+def test_foreign_key_cascade_deletes_tasks_and_events(tmp_path: Path) -> None:
+    """Deleting a run must cascade to its tasks and events.
+
+    Regression guard: _connect() now sets PRAGMA foreign_keys=ON. Without it the
+    declared ON DELETE CASCADE constraints are silently unenforced and rows orphan.
+    """
+    from contextlib import closing
+
+    store = SQLiteStateStore(tmp_path / "state.db")
+    _make_run_and_task(store, "run-fk", "task-fk")
+    store.append_event(EventRecord(
+        event_id="ev-fk", run_id="run-fk", task_id="task-fk", kind="task_created", payload={},
+    ))
+    assert store.list_tasks("run-fk"), "precondition: task exists"
+    assert store.list_events("run-fk"), "precondition: event exists"
+
+    with closing(store._connect()) as conn, conn:
+        conn.execute("DELETE FROM runs WHERE run_id = ?", ("run-fk",))
+
+    assert store.list_tasks("run-fk") == [], "tasks not cascade-deleted (FK not enforced)"
+    assert store.list_events("run-fk") == [], "events not cascade-deleted (FK not enforced)"
+
+
+def test_no_connection_leak_under_many_operations(tmp_path: Path) -> None:
+    """Repeated store operations must not leak file descriptors (connections close)."""
+    import os
+
+    fd_dir = "/proc/self/fd"
+    if not os.path.isdir(fd_dir):
+        import pytest
+        pytest.skip("requires /proc to count file descriptors")
+
+    store = SQLiteStateStore(tmp_path / "state.db")
+    _make_run_and_task(store, "run-leak", "task-leak")
+
+    before = len(os.listdir(fd_dir))
+    for _ in range(200):
+        store.get_run("run-leak")
+        store.list_tasks("run-leak")
+    after = len(os.listdir(fd_dir))
+
+    assert after - before < 50, (
+        f"file descriptors grew by {after - before} over 400 ops — connections leaking"
+    )
+
+
+def test_requeue_expired_lease_emits_event(tmp_path: Path) -> None:
+    """requeue_expired_leases must emit a 'lease_expired' audit event per reclaimed task."""
+    store = SQLiteStateStore(tmp_path / "state.db")
+    _make_run_and_task(store, "run-evt", "task-evt")
+    # Lease with a 0s lease so it is immediately expirable.
+    store.lease_next_pending_task(run_id="run-evt", worker_id="w1", lease_seconds=0)
+    import time
+    time.sleep(0.02)
+
+    count = store.requeue_expired_leases(run_id="run-evt")
+    assert count == 1
+
+    kinds = [e.kind for e in store.list_events("run-evt")]
+    assert "lease_expired" in kinds, "no lease_expired event emitted on reclaim"

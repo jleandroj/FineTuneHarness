@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import uuid
 from dataclasses import replace
 from datetime import datetime
 
@@ -93,7 +94,7 @@ class InMemoryStateStore(StateStore):
                 if task.status is TaskStatus.PENDING or (
                     task.status is TaskStatus.LEASED
                     and task.leased_until is not None
-                    and task.leased_until <= now
+                    and task.leased_until < now
                 ):
                     lease = Lease.from_seconds(worker_id, lease_seconds)
                     leased = replace(task, status=TaskStatus.LEASED, lease_owner=worker_id, leased_until=lease.leased_until)
@@ -124,14 +125,23 @@ class InMemoryStateStore(StateStore):
                     task.run_id == run_id
                     and task.status is TaskStatus.LEASED
                     and task.leased_until is not None
-                    and task.leased_until <= now
+                    and task.leased_until < now
                 ):
+                    prev_owner = task.lease_owner
                     self._tasks[task.task_id] = replace(
                         task,
                         status=TaskStatus.PENDING,
                         lease_owner=None,
                         leased_until=None,
                     )
+                    # Emit an audit event so silent recovery is visible (parity with SQLite).
+                    self._events.append(EventRecord(
+                        event_id=uuid.uuid4().hex,
+                        run_id=run_id,
+                        task_id=task.task_id,
+                        kind="lease_expired",
+                        payload={"previous_owner": prev_owner},
+                    ))
                     count += 1
         return count
 
