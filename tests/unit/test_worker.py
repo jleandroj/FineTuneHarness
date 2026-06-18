@@ -159,3 +159,83 @@ def test_worker_default_max_workers_is_4(tmp_path: Path) -> None:
     store, run_id = _make_run(tmp_path, ["t1"])
     worker = LocalWorker(worker_id="w", store=store)
     assert worker._executor._max_workers == 4
+
+
+def test_drain_stop_fn_halts_after_n_tasks(tmp_path: Path) -> None:
+    """stop_fn returning True must stop drain() — remaining tasks stay PENDING."""
+    keys = [f"t{i}" for i in range(6)]
+    store, run_id = _make_run(tmp_path, keys)
+    worker = LocalWorker(worker_id="w", store=store)
+
+    completed: list[str] = []
+    stop_after = 3
+
+    def handler(task):
+        completed.append(task.task_key)
+        return {"ok": True}
+
+    def stop_fn():
+        return len(completed) >= stop_after
+
+    succeeded = worker.drain(run_id=run_id, handler=handler, stop_fn=stop_fn)
+
+    assert succeeded == stop_after
+    assert len(completed) == stop_after
+    tasks = store.list_tasks(run_id)
+    pending = [t for t in tasks if t.status == TaskStatus.PENDING]
+    assert len(pending) == len(keys) - stop_after
+
+
+def test_drain_without_stop_fn_runs_all(tmp_path: Path) -> None:
+    """Without stop_fn, drain() runs every task (default behavior unchanged)."""
+    keys = [f"t{i}" for i in range(5)]
+    store, run_id = _make_run(tmp_path, keys)
+    worker = LocalWorker(worker_id="w", store=store)
+
+    succeeded = worker.drain(run_id=run_id, handler=lambda t: {"ok": True})
+    assert succeeded == len(keys)
+
+
+def test_drain_stop_fn_false_does_not_halt(tmp_path: Path) -> None:
+    """stop_fn that always returns False must not stop drain()."""
+    keys = [f"t{i}" for i in range(4)]
+    store, run_id = _make_run(tmp_path, keys)
+    worker = LocalWorker(worker_id="w", store=store)
+
+    succeeded = worker.drain(
+        run_id=run_id,
+        handler=lambda t: {"ok": True},
+        stop_fn=lambda: False,
+    )
+    assert succeeded == len(keys)
+
+
+def test_drain_early_stopping_hook_integration(tmp_path: Path) -> None:
+    """EarlyStoppingHook.should_stop wired to stop_fn must halt the grid."""
+    from finetuneharness.orchestrator.hooks import HookRegistry
+    from finetuneharness.registry.hooks import EarlyStoppingHook
+
+    keys = [f"t{i}" for i in range(10)]
+    store, run_id = _make_run(tmp_path, keys)
+
+    es = EarlyStoppingHook(metric="accuracy", patience=2, min_delta=0.01, mode="max")
+    registry = HookRegistry()
+    registry.register("after_task_success", es.after_task_success)
+
+    worker = LocalWorker(worker_id="w", store=store, hooks=registry)
+
+    call_count = 0
+
+    def handler(task):
+        nonlocal call_count
+        call_count += 1
+        # Flat accuracy — no improvement, so EarlyStopping triggers after patience=2
+        return {"accuracy": 0.7}
+
+    worker.drain(run_id=run_id, handler=handler, stop_fn=es.should_stop)
+
+    # patience=2 means: first task sets best=0.7, second and third don't improve →
+    # counter reaches 2 after the 3rd task → should_stop=True → drain stops at 3.
+    # (first task: best=0.7, counter=0; second: no improvement, counter=1;
+    #  third: no improvement, counter=2 → should_stop=True → stop after 3rd)
+    assert call_count == 3, f"Expected 3 tasks before early stop, got {call_count}"

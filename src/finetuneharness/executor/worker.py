@@ -222,12 +222,23 @@ class LocalWorker:
         self._hooks.fire("on_run_status_changed", run_id=run_id, status=run_status)
         return task
 
-    def drain(self, *, run_id: str, handler: TaskHandler) -> int:
+    def drain(
+        self,
+        *,
+        run_id: str,
+        handler: TaskHandler,
+        stop_fn: Callable[[], bool] | None = None,
+    ) -> int:
         """Run all pending tasks in a run, continuing past individual failures.
 
         Returns the number of tasks that succeeded. Raises DegradedRunError at
         the end (not mid-loop) if any tasks ended in FAILED or TIMED_OUT, so
         the caller always gets a complete grid run before learning about errors.
+
+        stop_fn: optional callable checked after each successful task. When it
+        returns True, drain() stops leasing new tasks immediately. Intended for
+        EarlyStoppingHook.should_stop() — without this, the hook sets its flag
+        but drain() keeps running tasks regardless.
         """
         succeeded = 0
         while True:
@@ -236,6 +247,8 @@ class LocalWorker:
                 if task is None:
                     break
                 succeeded += 1
+                if stop_fn is not None and stop_fn():
+                    break
             except Exception:
                 pass  # status + event already recorded by run_once; keep going
 
