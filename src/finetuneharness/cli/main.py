@@ -39,6 +39,10 @@ def main() -> None:
     start_cmd.add_argument("--run-id", required=True)
     start_cmd.add_argument("--state-db", default=".finetuneharness/state.db")
 
+    list_runs_cmd = sub.add_parser("list-runs", help="List all runs in the state DB")
+    list_runs_cmd.add_argument("--state-db", default=".finetuneharness/state.db")
+    list_runs_cmd.add_argument("--format", dest="fmt", choices=["text", "json"], default="text")
+
     compare_cmd = sub.add_parser("compare-runs", help="Compare two or more runs (first is baseline)")
     compare_cmd.add_argument("--run-id", dest="run_ids", action="append", required=True, metavar="RUN_ID",
                              help="Run IDs to compare; first is baseline. Repeat for each run.")
@@ -94,6 +98,19 @@ def main() -> None:
             }
             for artifact in artifacts
         ], indent=2))
+        return
+
+    if args.command == "list-runs":
+        store = SQLiteStateStore(Path(args.state_db))
+        runs = store.list_runs()
+        if args.fmt == "json":
+            print(json.dumps([
+                {"run_id": r.run_id, "name": r.name, "status": r.status.value}
+                for r in runs
+            ], indent=2))
+        else:
+            for r in runs:
+                print(f"{r.run_id}  {r.status.value:<16}  {r.name}")
         return
 
     if args.command == "start-run":

@@ -32,6 +32,8 @@ class RunRecord:
     name: str
     status: RunStatus
     config: dict[str, Any]
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    env_snapshot: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

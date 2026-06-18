@@ -37,7 +37,9 @@ class SQLiteStateStore(StateStore):
                     run_id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     status TEXT NOT NULL,
-                    config_json TEXT NOT NULL
+                    config_json TEXT NOT NULL,
+                    created_at TEXT,
+                    env_snapshot_json TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS tasks (
@@ -86,12 +88,24 @@ class SQLiteStateStore(StateStore):
             event_cols = {row['name'] for row in conn.execute("PRAGMA table_info(events)")}
             if 'created_at' not in event_cols:
                 conn.execute("ALTER TABLE events ADD COLUMN created_at TEXT")
+            run_cols = {row['name'] for row in conn.execute("PRAGMA table_info(runs)")}
+            if 'created_at' not in run_cols:
+                conn.execute("ALTER TABLE runs ADD COLUMN created_at TEXT")
+            if 'env_snapshot_json' not in run_cols:
+                conn.execute("ALTER TABLE runs ADD COLUMN env_snapshot_json TEXT")
 
     def create_run(self, run: RunRecord) -> None:
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO runs (run_id, name, status, config_json) VALUES (?, ?, ?, ?)",
-                (run.run_id, run.name, run.status.value, json.dumps(run.config, sort_keys=True)),
+                "INSERT INTO runs (run_id, name, status, config_json, created_at, env_snapshot_json) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    run.run_id,
+                    run.name,
+                    run.status.value,
+                    json.dumps(run.config, sort_keys=True),
+                    run.created_at.isoformat(),
+                    json.dumps(run.env_snapshot, sort_keys=True) if run.env_snapshot else None,
+                ),
             )
 
     def update_run_status(self, run_id: str, status: RunStatus) -> None:
@@ -103,7 +117,7 @@ class SQLiteStateStore(StateStore):
     def get_run(self, run_id: str) -> RunRecord | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT run_id, name, status, config_json FROM runs WHERE run_id = ?",
+                "SELECT run_id, name, status, config_json, created_at, env_snapshot_json FROM runs WHERE run_id = ?",
                 (run_id,),
             ).fetchone()
         if row is None:
@@ -113,7 +127,26 @@ class SQLiteStateStore(StateStore):
             name=row["name"],
             status=RunStatus(row["status"]),
             config=json.loads(row["config_json"]),
+            created_at=datetime.fromisoformat(row["created_at"]) if row["created_at"] else datetime.now(timezone.utc),
+            env_snapshot=json.loads(row["env_snapshot_json"]) if row["env_snapshot_json"] else {},
         )
+
+    def list_runs(self) -> list[RunRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT run_id, name, status, config_json, created_at, env_snapshot_json FROM runs ORDER BY rowid"
+            ).fetchall()
+        return [
+            RunRecord(
+                run_id=row["run_id"],
+                name=row["name"],
+                status=RunStatus(row["status"]),
+                config=json.loads(row["config_json"]),
+                created_at=datetime.fromisoformat(row["created_at"]) if row["created_at"] else datetime.now(timezone.utc),
+                env_snapshot=json.loads(row["env_snapshot_json"]) if row["env_snapshot_json"] else {},
+            )
+            for row in rows
+        ]
 
     def create_task(self, task: TaskRecord) -> None:
         with self._connect() as conn:

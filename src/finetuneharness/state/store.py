@@ -18,6 +18,9 @@ class StateStore(ABC):
     def get_run(self, run_id: str) -> RunRecord | None: ...
 
     @abstractmethod
+    def list_runs(self) -> list[RunRecord]: ...
+
+    @abstractmethod
     def create_task(self, task: TaskRecord) -> None: ...
 
     @abstractmethod

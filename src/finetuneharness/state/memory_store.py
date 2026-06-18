@@ -34,6 +34,10 @@ class InMemoryStateStore(StateStore):
         with self._lock:
             return self._runs.get(run_id)
 
+    def list_runs(self) -> list[RunRecord]:
+        with self._lock:
+            return list(self._runs.values())
+
     def create_task(self, task: TaskRecord) -> None:
         with self._lock:
             if task.task_id in self._tasks:

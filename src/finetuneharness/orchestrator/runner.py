@@ -8,6 +8,7 @@ from typing import Any
 from finetuneharness.observability.logging import get_logger
 from finetuneharness.orchestrator.approval import ApprovalGate
 from finetuneharness.orchestrator.lifecycle import ensure_run_transition
+from finetuneharness.state.env_snapshot import capture_env_snapshot
 from finetuneharness.state.models import EventRecord, RunRecord, RunStatus, TaskRecord, TaskStatus
 from finetuneharness.state.store import StateStore
 from finetuneharness.validation.configs import validate_run_config
@@ -21,9 +22,17 @@ class FineTuneRunner:
         self._log = get_logger("finetuneharness.runner")
 
     def create_run(self, *, name: str, config: dict[str, Any], tasks: list[dict[str, Any]]) -> str:
+        from datetime import datetime, timezone
         validate_run_config(config)
         run_id = uuid.uuid4().hex
-        run = RunRecord(run_id=run_id, name=name, status=RunStatus.CREATED, config=config)
+        run = RunRecord(
+            run_id=run_id,
+            name=name,
+            status=RunStatus.CREATED,
+            config=config,
+            created_at=datetime.now(timezone.utc),
+            env_snapshot=capture_env_snapshot(),
+        )
         self._store.create_run(run)
         self._store.append_event(EventRecord(event_id=uuid.uuid4().hex, run_id=run_id, task_id=None, kind="run_created", payload={"name": name}))
 
