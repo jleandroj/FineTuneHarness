@@ -105,20 +105,56 @@ class _DummySandbox:
         return handler(task)
 
 
-class EarlyStoppingHook:  # name intentionally matches the cumulative-hook guard list
-    """Stand-in whose method qualname trips the cumulative-hook guard."""
+class _MarkedCumulativeHook:
+    """Custom hook that opts into the cumulative marker (interface-based detection)."""
+
+    cumulative_across_tasks = True
+
+    def after_task_success(self, *args, **kwargs):
+        pass
+
+
+class MetricsHook:
+    """Stand-in named like a once-denylisted hook but WITHOUT the marker — the guard
+    must NOT flag it (proves classification is by interface, not by name)."""
 
     def after_task_success(self, *args, **kwargs):
         pass
 
 
 def _cumulative_hook_factory():
-    """Factory producing a registry with a cumulative (EarlyStopping) hook."""
     from finetuneharness.orchestrator.hooks import HookRegistry
 
     reg = HookRegistry()
-    reg.register("after_task_success", EarlyStoppingHook().after_task_success)
+    reg.register("after_task_success", _MarkedCumulativeHook().after_task_success)
     return reg
+
+
+def _stateless_named_hook_factory():
+    from finetuneharness.orchestrator.hooks import HookRegistry
+
+    reg = HookRegistry()
+    reg.register("after_task_success", MetricsHook().after_task_success)
+    return reg
+
+
+def _checkpoint_hook_factory():
+    """Real CheckpointHook (per-task, NOT cumulative) — allowed in concurrent mode."""
+    from finetuneharness.orchestrator.hooks import HookRegistry
+    from finetuneharness.registry.hooks import CheckpointHook
+
+    reg = HookRegistry()
+    ckpt = CheckpointHook(checkpoint_dir=os.environ["FTH_CKPT_DIR"])
+    reg.register("before_task", ckpt.before_task)
+    reg.register("after_task_success", ckpt.after_task_success)
+    return reg
+
+
+def _h_record_ckpt(task):
+    """Record whether CheckpointHook.before_task injected a checkpoint_dir."""
+    d = Path(task.payload["obs_dir"])
+    (d / task.task_key).write_text("yes" if "checkpoint_dir" in task.payload else "no")
+    return {"accuracy": 0.9, "f1": 0.88}
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -419,9 +455,9 @@ def test_drain_concurrent_rejects_custom_sandbox_without_factory(tmp_path: Path)
         )
 
 
-def test_drain_concurrent_rejects_cumulative_hooks(tmp_path: Path) -> None:
-    """Cumulative hooks (EarlyStopping/Metrics/Progress/Checkpoint) keep per-instance
-    state that cannot aggregate across the separate task processes — reject, not mislead."""
+def test_drain_concurrent_rejects_marked_cumulative_hook(tmp_path: Path) -> None:
+    """A hook carrying `cumulative_across_tasks = True` is rejected — covers custom
+    hooks, not just the framework's own."""
     store, run_id = _make_run(tmp_path, [{"task_key": "t"}])
     worker = LocalWorker(
         worker_id="w", store=store, hooks_factory=f"{__name__}:_cumulative_hook_factory"
@@ -431,6 +467,41 @@ def test_drain_concurrent_rejects_cumulative_hooks(tmp_path: Path) -> None:
             run_id=run_id, handler=_h_ok,
             concurrency=_resource_aware(), monitor=_FakeMonitor(50000),
         )
+
+
+def test_drain_concurrent_allows_stateless_hook_named_like_a_known_one(tmp_path: Path) -> None:
+    """Boundary: classification is by the marker, not the class name. A hook named
+    'MetricsHook' WITHOUT the marker must NOT be rejected (no false positive)."""
+    obs = tmp_path / "obs"
+    obs.mkdir()
+    store, run_id = _make_run(tmp_path, [{"task_key": "t", "obs_dir": str(obs)}])
+    worker = LocalWorker(
+        worker_id="w", store=store, hooks_factory=f"{__name__}:_stateless_named_hook_factory"
+    )
+    succeeded = worker.drain_concurrent(
+        run_id=run_id, handler=_h_record,
+        concurrency=_resource_aware(), monitor=_FakeMonitor(50000),
+    )
+    assert succeeded == 1
+
+
+def test_checkpoint_hook_allowed_and_runs_in_concurrent(tmp_path: Path, monkeypatch) -> None:
+    """CheckpointHook is per-task (not cumulative): allowed in concurrent mode, and it
+    actually runs in the children (injects checkpoint_dir into each task payload)."""
+    obs = tmp_path / "obs"
+    obs.mkdir()
+    monkeypatch.setenv("FTH_CKPT_DIR", str(tmp_path / "ckpt"))
+    keys = ["t0", "t1", "t2"]
+    store, run_id = _make_run(tmp_path, [{"task_key": k, "obs_dir": str(obs)} for k in keys])
+    worker = LocalWorker(
+        worker_id="w", store=store, hooks_factory=f"{__name__}:_checkpoint_hook_factory"
+    )
+    succeeded = worker.drain_concurrent(
+        run_id=run_id, handler=_h_record_ckpt,
+        concurrency=_resource_aware(max_concurrent=2), monitor=_FakeMonitor(50000),
+    )
+    assert succeeded == 3
+    assert {f.read_text() for f in obs.iterdir()} == {"yes"}, "CheckpointHook did not run in children"
 
 
 def test_drain_concurrent_rejects_stop_fn(tmp_path: Path) -> None:

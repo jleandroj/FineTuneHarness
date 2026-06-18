@@ -63,6 +63,24 @@ class HookRegistry:
                 for fn in fns
             ]
 
+    def cumulative_hook_types(self) -> list[str]:
+        """Type names of registered hooks that declare cross-task in-memory state.
+
+        Classification is by INTERFACE, not a name denylist: a hook opts in by setting
+        the class attribute ``cumulative_across_tasks = True`` on its instance. Such a
+        hook is unsafe under per-process concurrency (its state cannot aggregate across
+        the separate processes each task runs in) unless it persists state externally.
+        Covers custom hooks and avoids false positives on same-named-but-stateless ones.
+        """
+        with self._lock:
+            seen: dict[str, bool] = {}
+            for fns in self._hooks.values():
+                for fn in fns:
+                    inst = getattr(fn, "__self__", None)
+                    if inst is not None and getattr(inst, "cumulative_across_tasks", False):
+                        seen[type(inst).__name__] = True
+            return sorted(seen)
+
     def fire(self, point: str, **kwargs: Any) -> None:
         with self._lock:
             fns = list(self._hooks.get(point, []))

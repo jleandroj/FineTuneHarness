@@ -233,6 +233,10 @@ class MetricsHook:
 class EarlyStoppingHook:
     """Stop run if metric doesn't improve for N consecutive tasks."""
 
+    # Counts consecutive non-improvements in instance memory to drive should_stop —
+    # cannot aggregate across per-process tasks, so drain_concurrent rejects it.
+    cumulative_across_tasks = True
+
     metric: str = "accuracy"
     patience: int = 5
     min_delta: float = 0.001
@@ -321,6 +325,10 @@ class ProgressHook:
     Without it, only completed-count and throughput are reported (the hook has no
     other way to know the grid size).
     """
+
+    # Counts completed tasks in instance memory for progress/ETA — meaningless per
+    # process under concurrency (each child would count only its own task).
+    cumulative_across_tasks = True
 
     log_every: int = 1
     total_tasks: int | None = None

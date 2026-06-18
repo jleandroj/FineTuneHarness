@@ -28,17 +28,6 @@ from finetuneharness.state.store import StateStore
 
 TaskHandler = Callable[[TaskRecord], dict[str, object]]
 
-# Hooks that accumulate state across tasks in instance memory. Under drain_concurrent
-# each task runs in its own process with a fresh hook instance, so their state never
-# aggregates (EarlyStopping would never trip; Metrics.get_summary/Progress would see
-# one task). drain_concurrent rejects them rather than give silently-wrong results.
-_CUMULATIVE_HOOK_CLASSES = (
-    "EarlyStoppingHook",
-    "MetricsHook",
-    "ProgressHook",
-    "CheckpointHook",
-)
-
 
 class DegradedRunError(Exception):
     """Raised by drain() when one or more tasks failed, timed out, or were degenerate.
@@ -578,18 +567,16 @@ class LocalWorker:
                 "or use drain()."
             )
         # Cumulative hooks keep per-instance state that cannot aggregate across the
-        # separate processes each task runs in — reject rather than mislead.
-        offenders = sorted({
-            name.split(".", 1)[0]
-            for name in self._hooks.all_hook_names()
-            if name.split(".", 1)[0] in _CUMULATIVE_HOOK_CLASSES
-        })
+        # separate processes each task runs in — reject rather than mislead. Classified
+        # by the `cumulative_across_tasks` marker (interface), not a name denylist, so
+        # custom hooks are covered and stateless same-named hooks are not false-flagged.
+        offenders = self._hooks.cumulative_hook_types()
         if offenders:
             raise RuntimeError(
                 f"drain_concurrent: cumulative hooks {offenders} keep per-instance state "
-                "that does not aggregate across the separate task processes (EarlyStopping "
-                "would never trip; Metrics.get_summary/Progress would see one task). Use "
-                "sequential drain() for these hooks."
+                "that does not aggregate across the separate task processes (e.g. "
+                "EarlyStopping would never trip). Mark a hook with "
+                "`cumulative_across_tasks = True`; use sequential drain() for these hooks."
             )
 
         self._max_oom_retries = concurrency.max_oom_retries

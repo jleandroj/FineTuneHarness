@@ -102,10 +102,13 @@ tests/unit/      — 42 tests
   so children recreate them; passing a *concrete* non-default `hooks`/`sandbox` to
   drain_concurrent RAISES (they cannot cross to a spawned child). A parity test
   asserts hooks fire equally in both modes. drain_concurrent ALSO rejects (a)
-  cumulative hooks (EarlyStopping/Metrics/Progress/Checkpoint — per-instance state
-  cannot aggregate across task processes, so EarlyStopping would never trip) and
-  (b) `stop_fn` (its decision needs aggregate state no task process sees) — use
-  sequential `drain()` for those; (4) the OOM retry budget is counted from
+  cumulative hooks and (b) `stop_fn` (needs aggregate state no task process sees) —
+  use sequential `drain()` for those. Cumulative hooks are classified by INTERFACE,
+  not a name denylist: a hook opts in via the class attribute
+  `cumulative_across_tasks = True` (set on EarlyStopping and Progress). Metrics is NOT
+  cumulative (its `get_summary` reads the shared JSONL, so it aggregates across
+  processes) and CheckpointHook is NOT (per-task; its dir comes from task_key/config),
+  so both run fine concurrently; (4) the OOM retry budget is counted from
   persisted `task_oom_requeued` events, not worker memory, since each attempt is a
   fresh process; (5) `before_run_start` fires once in the parent — children inherit
   the cached seed and apply it without re-firing. With no GPU detectable
@@ -137,8 +140,12 @@ tests/unit/      — 42 tests
   `tests/concurrency/test_multiprocess.py`).
 - Approval gate is ENFORCED: `finetuneharness run` refuses a run with no recorded
   approval (a `run_approved` event from `start-run`) unless `--skip-approval` is
-  passed. Enforcement lives in the CLI only; `worker.drain*` itself is unguarded so
-  tests and library callers are not forced through the gate.
+  passed — which itself records an `approval_skipped` audit event with the actor.
+  Enforcement lives in the CLI only; `worker.drain*` is unguarded so tests/library
+  callers are not forced through the gate. Approval records the verified *actor*
+  (`start-run --approver`, else the OS user) in the `run_approved` event; an optional
+  config `approval.allowed_actors` allowlist denies unauthorized approvers. This is
+  lightweight attribution + allowlist, NOT cryptographic identity/SSO.
 
 ### Two validation routes (they are NOT equivalent)
 

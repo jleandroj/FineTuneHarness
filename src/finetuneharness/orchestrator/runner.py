@@ -135,17 +135,17 @@ class FineTuneRunner:
         if run is None:
             raise KeyError(f"unknown run_id: {run_id}")
         tasks = self._store.list_tasks(run_id)
-        gate.check(run, tasks)
+        actor = gate.check(run, tasks)
         self._store.append_event(
             EventRecord(
                 event_id=uuid.uuid4().hex,
                 run_id=run_id,
                 task_id=None,
                 kind="run_approved",
-                payload={"gate": type(gate).__name__},
+                payload={"gate": type(gate).__name__, "actor": actor},
             )
         )
-        self._log.info("run_approved", extra={"run_id": run_id})
+        self._log.info("run_approved", extra={"run_id": run_id, "actor": actor})
 
     def get_run_status(self, run_id: str) -> dict[str, object]:
         status = self.refresh_run_status(run_id)

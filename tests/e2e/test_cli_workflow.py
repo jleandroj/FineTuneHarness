@@ -285,3 +285,30 @@ def test_run_refuses_unapproved_run(tmp_path: Path) -> None:
     finally:
         sys.path.remove(str(tmp_path))
         sys.modules.pop("approval_handler_mod", None)
+
+
+def test_skip_approval_records_audit_event(tmp_path: Path) -> None:
+    """`run --skip-approval` must leave an approval_skipped audit event (who bypassed)."""
+    from finetuneharness.state.sqlite import SQLiteStateStore
+
+    cfg, tasks = _write_fixtures(tmp_path)
+    db = str(tmp_path / "state.db")
+    run_id = _invoke(
+        "create-run", "--name", "skip-audit", "--config", str(cfg),
+        "--tasks", str(tasks), "--state-db", db,
+    ).strip()
+
+    handler_mod = tmp_path / "skip_handler_mod.py"
+    handler_mod.write_text("def handle(task):\n    return {'accuracy': 0.9, 'f1': 0.88}\n")
+    sys.path.insert(0, str(tmp_path))
+    try:
+        _invoke("run", "--run-id", run_id, "--state-db", db,
+                "--handler", "skip_handler_mod:handle", "--skip-approval")
+    finally:
+        sys.path.remove(str(tmp_path))
+        sys.modules.pop("skip_handler_mod", None)
+
+    events = SQLiteStateStore(Path(db)).list_events(run_id)
+    skipped = [e for e in events if e.kind == "approval_skipped"]
+    assert len(skipped) == 1
+    assert skipped[0].payload.get("actor")

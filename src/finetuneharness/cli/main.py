@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import uuid
 from pathlib import Path
 
 from finetuneharness.evaluation.comparator import (
@@ -13,9 +14,14 @@ from finetuneharness.evaluation.comparator import (
 from finetuneharness.evaluation.report import format_report, report_to_dict
 from finetuneharness.executor.resources import ConcurrencyConfig, NvmlMonitor
 from finetuneharness.executor.worker import DegradedRunError, LocalWorker
-from finetuneharness.orchestrator.approval import ApprovalError, InteractiveApprovalGate
+from finetuneharness.orchestrator.approval import (
+    ApprovalError,
+    InteractiveApprovalGate,
+    resolve_actor,
+)
 from finetuneharness.orchestrator.runner import FineTuneRunner
 from finetuneharness.state.memory_store import InMemoryStateStore
+from finetuneharness.state.models import EventRecord
 from finetuneharness.state.reproducibility import assess_reproducibility, export_manifest
 from finetuneharness.state.sqlite import SQLiteStateStore
 
@@ -129,6 +135,11 @@ def main() -> None:
     start_cmd = sub.add_parser("start-run", help="Interactively approve a validated run before workers start")
     start_cmd.add_argument("--run-id", required=True)
     start_cmd.add_argument("--state-db", default=".finetuneharness/state.db")
+    start_cmd.add_argument(
+        "--approver", default=None,
+        help="Identity recorded as the run's approver (defaults to the OS user). "
+             "Verified against config 'approval.allowed_actors' when present.",
+    )
 
     list_runs_cmd = sub.add_parser("list-runs", help="List all runs in the state DB")
     list_runs_cmd.add_argument("--state-db", default=".finetuneharness/state.db")
@@ -190,7 +201,13 @@ def main() -> None:
             print(f"Error: unknown run_id {args.run_id!r}", flush=True)
             raise SystemExit(1)
 
-        if not args.skip_approval and not _is_approved(store, args.run_id):
+        if args.skip_approval:
+            # Audit who bypassed the gate.
+            store.append_event(EventRecord(
+                event_id=uuid.uuid4().hex, run_id=args.run_id, task_id=None,
+                kind="approval_skipped", payload={"actor": resolve_actor()},
+            ))
+        elif not _is_approved(store, args.run_id):
             print(
                 f"Error: run {args.run_id} has not been approved. "
                 f"Run 'finetuneharness start-run --run-id {args.run_id}' first, "
@@ -283,7 +300,16 @@ def main() -> None:
     if args.command == "start-run":
         store = SQLiteStateStore(Path(args.state_db))
         runner = FineTuneRunner(store)
-        gate = InteractiveApprovalGate()
+        run = store.get_run(args.run_id)
+        if run is None:
+            print(f"Error: unknown run_id {args.run_id!r}", flush=True)
+            raise SystemExit(1)
+        # Optional allowlist of authorized approvers, from run config.
+        allowed = None
+        approval_cfg = run.config.get("approval") if isinstance(run.config, dict) else None
+        if isinstance(approval_cfg, dict) and approval_cfg.get("allowed_actors"):
+            allowed = tuple(approval_cfg["allowed_actors"])
+        gate = InteractiveApprovalGate(actor=args.approver, allowed_actors=allowed)
         try:
             runner.await_approval(args.run_id, gate)
             print(f"Run {args.run_id} approved. Start workers to begin execution.")

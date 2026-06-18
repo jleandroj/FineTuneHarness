@@ -132,3 +132,31 @@ def test_denied_run_does_not_record_approved_event() -> None:
 
     events = store.list_events(run_id)
     assert "run_approved" not in [e.kind for e in events]
+
+
+# --- Actor attribution + allowlist (multi-tenant, lightweight) ---
+
+def test_approved_event_records_actor() -> None:
+    store = InMemoryStateStore()
+    runner = FineTuneRunner(store)
+    run_id = _make_run(runner)
+
+    gate = InteractiveApprovalGate(stream=io.StringIO("y\n"), actor="alice")
+    runner.await_approval(run_id, gate)
+
+    approved = [e for e in store.list_events(run_id) if e.kind == "run_approved"]
+    assert len(approved) == 1
+    assert approved[0].payload["actor"] == "alice"
+
+
+def test_unauthorized_actor_is_denied() -> None:
+    store = InMemoryStateStore()
+    runner = FineTuneRunner(store)
+    run_id = _make_run(runner)
+
+    gate = InteractiveApprovalGate(
+        stream=io.StringIO("y\n"), actor="bob", allowed_actors=("alice",)
+    )
+    with pytest.raises(ApprovalError, match="not authorized"):
+        runner.await_approval(run_id, gate)
+    assert "run_approved" not in [e.kind for e in store.list_events(run_id)]
