@@ -13,6 +13,8 @@ _BASE_CONFIG = {
     "project": {"name": "approval-test"},
     "executor": {"kind": "local"},
     "artifacts": {"root": "./artifacts"},
+    "seed": 42,
+    "dataset_hash": "sha256:test",
 }
 
 

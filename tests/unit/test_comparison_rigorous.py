@@ -31,7 +31,7 @@ def _make_run(
     config: dict | None = None,
     env_snapshot: dict | None = None,
 ) -> str:
-    base = {"project": {"name": "test"}, "executor": {"kind": "local"}, "artifacts": {"root": "."}}
+    base = {"project": {"name": "test"}, "executor": {"kind": "local"}, "artifacts": {"root": "."}, "seed": 42, "dataset_hash": "sha256:test"}
     if config:
         base.update(config)
     return runner.create_run(

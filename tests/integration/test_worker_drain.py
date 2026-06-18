@@ -17,6 +17,8 @@ _CONFIG = {
     "project": {"name": "drain-test"},
     "executor": {"kind": "local"},
     "artifacts": {"root": "./artifacts"},
+    "seed": 42,
+    "dataset_hash": "sha256:test",
 }
 
 

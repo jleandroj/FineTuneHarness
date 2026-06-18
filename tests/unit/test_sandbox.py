@@ -31,6 +31,8 @@ def _make_run(store, tmp_path, *, tasks=None):
             "project": {"name": "demo"},
             "executor": {"kind": "local"},
             "artifacts": {"root": str(tmp_path / "artifacts")},
+            "seed": 42,
+            "dataset_hash": "sha256:test",
         },
         tasks=tasks or [{"task_key": "cell-1", "kind": "train"}],
     )

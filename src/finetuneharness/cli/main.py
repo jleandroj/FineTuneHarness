@@ -14,6 +14,7 @@ from finetuneharness.evaluation.report import format_report, report_to_dict
 from finetuneharness.orchestrator.approval import ApprovalError, InteractiveApprovalGate
 from finetuneharness.orchestrator.runner import FineTuneRunner
 from finetuneharness.state.memory_store import InMemoryStateStore
+from finetuneharness.state.reproducibility import assess_reproducibility, export_manifest
 from finetuneharness.state.sqlite import SQLiteStateStore
 
 
@@ -74,6 +75,15 @@ def main() -> None:
         "--thresholds", default=None, metavar="JSON",
         help="JSON dict of per-metric regression thresholds, e.g. '{\"f1\": 0.03}'",
     )
+
+    repro_cmd = sub.add_parser("validate-reproducibility", help="Assess reproducibility of a run")
+    repro_cmd.add_argument("--run-id", required=True)
+    repro_cmd.add_argument("--state-db", default=".finetuneharness/state.db")
+    repro_cmd.add_argument("--format", dest="fmt", choices=["text", "json"], default="text")
+
+    manifest_cmd = sub.add_parser("export-manifest", help="Export a full reproducibility manifest for a run")
+    manifest_cmd.add_argument("--run-id", required=True)
+    manifest_cmd.add_argument("--state-db", default=".finetuneharness/state.db")
 
     args = parser.parse_args()
 
@@ -162,6 +172,48 @@ def main() -> None:
         except ApprovalError as exc:
             print(f"Denied: {exc}")
             raise SystemExit(1)
+        return
+
+    if args.command == "validate-reproducibility":
+        store = SQLiteStateStore(Path(args.state_db))
+        run = store.get_run(args.run_id)
+        if run is None:
+            print(f"Error: unknown run_id {args.run_id!r}", flush=True)
+            raise SystemExit(1)
+        assessment = assess_reproducibility(run)
+        if args.fmt == "json":
+            print(json.dumps({
+                "run_id": run.run_id,
+                "name": run.name,
+                "level": assessment.level,
+                "bitwise_reproducible": assessment.bitwise_reproducible,
+                "replayable": assessment.replayable,
+                "missing_fields": assessment.missing_fields,
+                "warnings": assessment.warnings,
+            }, indent=2))
+        else:
+            icon = {"PASS": "✓", "PARTIAL": "~", "FAIL": "✗"}.get(assessment.level, "?")
+            print(f"{icon} Reproducibility: {assessment.level}  (run {run.run_id[:8]} — {run.name})")
+            if assessment.missing_fields:
+                print("  Missing fields:")
+                for f in assessment.missing_fields:
+                    print(f"    - {f}")
+            if assessment.warnings:
+                print("  Warnings:")
+                for w in assessment.warnings:
+                    print(f"    ! {w}")
+        return
+
+    if args.command == "export-manifest":
+        store = SQLiteStateStore(Path(args.state_db))
+        run = store.get_run(args.run_id)
+        if run is None:
+            print(f"Error: unknown run_id {args.run_id!r}", flush=True)
+            raise SystemExit(1)
+        tasks = store.list_tasks(args.run_id)
+        artifacts = store.list_artifacts(args.run_id)
+        manifest = export_manifest(run, tasks, artifacts)
+        print(json.dumps(manifest, indent=2))
         return
 
     if args.command == "compare-runs":

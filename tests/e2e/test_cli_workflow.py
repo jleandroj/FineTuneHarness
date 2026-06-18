@@ -15,6 +15,8 @@ _BASE_CONFIG: dict[str, Any] = {
     "project": {"name": "e2e-project"},
     "executor": {"kind": "local"},
     "artifacts": {"root": "./artifacts"},
+    "seed": 42,
+    "dataset_hash": "sha256:test",
 }
 
 _BASE_TASKS = [

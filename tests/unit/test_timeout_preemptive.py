@@ -16,7 +16,7 @@ def test_timeout_unblocks_worker_before_handler_finishes(tmp_path: Path) -> None
     runner = FineTuneRunner(store)
     run_id = runner.create_run(
         name="hang-test",
-        config={"project": {"name": "demo"}, "executor": {"kind": "local"}, "artifacts": {"root": "./artifacts"}},
+        config={"project": {"name": "demo"}, "executor": {"kind": "local"}, "artifacts": {"root": "./artifacts"}, "seed": 42, "dataset_hash": "sha256:test"},
         tasks=[{"task_key": "cell-1", "kind": "train"}],
     )
     worker = LocalWorker(
@@ -43,7 +43,7 @@ def test_task_without_timeout_runs_to_completion(tmp_path: Path) -> None:
     runner = FineTuneRunner(store)
     run_id = runner.create_run(
         name="no-timeout-test",
-        config={"project": {"name": "demo"}, "executor": {"kind": "local"}, "artifacts": {"root": "./artifacts"}},
+        config={"project": {"name": "demo"}, "executor": {"kind": "local"}, "artifacts": {"root": "./artifacts"}, "seed": 42, "dataset_hash": "sha256:test"},
         tasks=[{"task_key": "cell-1", "kind": "train"}],
     )
     worker = LocalWorker(worker_id="w1", store=store)

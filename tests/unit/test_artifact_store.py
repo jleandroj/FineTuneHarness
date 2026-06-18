@@ -14,6 +14,8 @@ def test_write_json_artifact_registers_checksum(tmp_path: Path) -> None:
             "project": {"name": "demo"},
             "executor": {"kind": "local"},
             "artifacts": {"root": str(tmp_path / 'artifacts')},
+            "seed": 42,
+            "dataset_hash": "sha256:test",
         },
         tasks=[{"task_key": "cell-1", "kind": "train"}],
     )

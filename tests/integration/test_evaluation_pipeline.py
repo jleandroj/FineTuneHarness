@@ -16,6 +16,8 @@ _CONFIG = {
     "project": {"name": "eval-integration"},
     "executor": {"kind": "local"},
     "artifacts": {"root": "./artifacts"},
+    "seed": 42,
+    "dataset_hash": "sha256:test",
 }
 
 

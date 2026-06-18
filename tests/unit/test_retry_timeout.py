@@ -19,6 +19,8 @@ def test_worker_retries_then_succeeds(tmp_path: Path) -> None:
             "project": {"name": "demo"},
             "executor": {"kind": "local"},
             "artifacts": {"root": str(tmp_path / 'artifacts')},
+            "seed": 42,
+            "dataset_hash": "sha256:test",
         },
         tasks=[{"task_key": "cell-1", "kind": "train", "max_attempts": 2}],
     )
@@ -59,6 +61,8 @@ def test_worker_marks_timeout(tmp_path: Path) -> None:
             "project": {"name": "demo"},
             "executor": {"kind": "local"},
             "artifacts": {"root": str(tmp_path / 'artifacts')},
+            "seed": 42,
+            "dataset_hash": "sha256:test",
         },
         tasks=[{"task_key": "cell-1", "kind": "train"}],
     )

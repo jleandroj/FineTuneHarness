@@ -35,6 +35,10 @@ class RunRecord:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     env_snapshot: dict[str, Any] = field(default_factory=dict)
     finished_at: datetime | None = None
+    # Reproducibility fields — extracted from config at create_run time
+    seed: int | None = None
+    dataset_hashes: dict[str, str] = field(default_factory=dict)
+    config_hash: str | None = None
 
 
 @dataclass(frozen=True)

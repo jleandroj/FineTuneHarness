@@ -10,6 +10,8 @@ _VALID = {
     "project": {"name": "my-project"},
     "executor": {"kind": "local"},
     "artifacts": {"root": "./artifacts"},
+    "seed": 42,
+    "dataset_hash": "sha256:abc123",
 }
 
 

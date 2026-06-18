@@ -16,7 +16,7 @@ def _make_run(tmp_path: Path, name: str = "hook-test", tasks: list | None = None
     runner = FineTuneRunner(store)
     run_id = runner.create_run(
         name=name,
-        config={"project": {"name": "demo"}, "executor": {"kind": "local"}, "artifacts": {"root": "./artifacts"}},
+        config={"project": {"name": "demo"}, "executor": {"kind": "local"}, "artifacts": {"root": "./artifacts"}, "seed": 42, "dataset_hash": "sha256:test"},
         tasks=tasks or [{"task_key": "cell-1", "kind": "train"}],
     )
     return store, run_id

@@ -15,6 +15,8 @@ def test_run_becomes_completed_when_all_tasks_succeed(tmp_path: Path) -> None:
             "project": {"name": "demo"},
             "executor": {"kind": "local"},
             "artifacts": {"root": "./artifacts"},
+            "seed": 42,
+            "dataset_hash": "sha256:test",
         },
         tasks=[
             {"task_key": "cell-1", "kind": "train"},
@@ -39,6 +41,8 @@ def test_run_becomes_partial_failed_when_some_tasks_fail(tmp_path: Path) -> None
             "project": {"name": "demo"},
             "executor": {"kind": "local"},
             "artifacts": {"root": "./artifacts"},
+            "seed": 42,
+            "dataset_hash": "sha256:test",
         },
         tasks=[
             {"task_key": "cell-1", "kind": "train"},

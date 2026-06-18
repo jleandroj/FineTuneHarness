@@ -15,7 +15,7 @@ def test_two_workers_each_execute_exactly_one_unique_task(tmp_path: Path) -> Non
     runner = FineTuneRunner(store)
     run_id = runner.create_run(
         name="concurrency-test",
-        config={"project": {"name": "demo"}, "executor": {"kind": "local"}, "artifacts": {"root": "./artifacts"}},
+        config={"project": {"name": "demo"}, "executor": {"kind": "local"}, "artifacts": {"root": "./artifacts"}, "seed": 42, "dataset_hash": "sha256:test"},
         tasks=[
             {"task_key": "cell-1"},
             {"task_key": "cell-2"},
@@ -59,7 +59,7 @@ def test_no_task_executed_twice_under_race(tmp_path: Path) -> None:
     runner = FineTuneRunner(store)
     run_id = runner.create_run(
         name="race-test",
-        config={"project": {"name": "demo"}, "executor": {"kind": "local"}, "artifacts": {"root": "./artifacts"}},
+        config={"project": {"name": "demo"}, "executor": {"kind": "local"}, "artifacts": {"root": "./artifacts"}, "seed": 42, "dataset_hash": "sha256:test"},
         tasks=[{"task_key": "only-task"}],
     )
 
