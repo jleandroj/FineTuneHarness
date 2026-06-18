@@ -67,6 +67,19 @@ def test_register_unknown_hook_point_raises() -> None:
         hooks.register("nonexistent_point", lambda: None)
 
 
+def test_hook_crash_is_logged(tmp_path: Path, caplog) -> None:
+    import logging
+    store, run_id = _make_run(tmp_path)
+    hooks = HookRegistry()
+    hooks.register("before_task", lambda task: (_ for _ in ()).throw(ValueError("hook kaboom")))
+
+    worker = LocalWorker(worker_id="w1", store=store, hooks=hooks)
+    with caplog.at_level(logging.WARNING):
+        worker.run_once(run_id=run_id, handler=lambda task: {"ok": True})
+
+    assert any("hook_error" in r.message or "hook kaboom" in r.message for r in caplog.records)
+
+
 def test_on_run_status_changed_fires_on_completion(tmp_path: Path) -> None:
     store, run_id = _make_run(tmp_path)
     statuses: list = []

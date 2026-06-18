@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import threading
+import traceback
 from typing import Any, Callable
 
+from finetuneharness.observability.logging import get_logger
 
 HookFn = Callable[..., None]
+
+_log = get_logger(__name__)
 
 VALID_POINTS = frozenset({
     "before_run_start",
@@ -46,5 +50,13 @@ class HookRegistry:
         for fn in fns:
             try:
                 fn(**kwargs)
-            except Exception:
-                pass
+            except Exception as exc:
+                _log.warning(
+                    "hook_error",
+                    extra={
+                        "point": point,
+                        "hook": getattr(fn, "__qualname__", repr(fn)),
+                        "error": str(exc),
+                        "traceback": traceback.format_exc(),
+                    },
+                )

@@ -7,7 +7,7 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Callable
 
 from finetuneharness.artifacts.store import ArtifactStore
-from finetuneharness.executor.policy import RetryPolicy, TimeoutPolicy
+from finetuneharness.executor.policy import NoSandbox, RetryPolicy, SandboxPolicy, TimeoutPolicy
 from finetuneharness.observability.logging import get_logger
 from finetuneharness.orchestrator.hooks import HookRegistry
 from finetuneharness.orchestrator.runner import FineTuneRunner
@@ -22,9 +22,11 @@ TaskHandler = Callable[[TaskRecord], dict[str, object]]
 class LocalWorker:
     """Local worker with preemptive timeout, hooks, and injectable dependencies.
 
-    Timeout is enforced via concurrent.futures: the worker unblocks after
-    timeout_seconds even if the handler is still running. The handler thread
-    continues in the background until it completes naturally.
+    Timeout is enforced via a shared ThreadPoolExecutor (max_workers=4) that is
+    reused across calls. When a timeout fires the submitted future is abandoned
+    but the underlying thread continues until the handler returns naturally —
+    Python offers no safe way to kill a running thread. The bounded pool ensures
+    at most 4 leaked threads can accumulate simultaneously.
     """
 
     def __init__(
@@ -38,6 +40,7 @@ class LocalWorker:
         runner: FineTuneRunner | None = None,
         scheduler: TaskScheduler | None = None,
         hooks: HookRegistry | None = None,
+        sandbox: SandboxPolicy | None = None,
     ) -> None:
         self.worker_id = worker_id
         self._store = store
@@ -47,9 +50,18 @@ class LocalWorker:
         self._scheduler = scheduler or TaskScheduler(store)
         self._runner = runner or FineTuneRunner(store)
         self._hooks = hooks or HookRegistry()
+        self._sandbox: SandboxPolicy = sandbox or NoSandbox()
         self._log = get_logger("finetuneharness.worker")
+        self._executor = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix=f"worker-{worker_id}"
+        )
+        self._started_runs: set[str] = set()
 
     def run_once(self, *, run_id: str, handler: TaskHandler) -> TaskRecord | None:
+        if run_id not in self._started_runs:
+            self._started_runs.add(run_id)
+            self._hooks.fire("before_run_start", run_id=run_id)
+
         task = self._scheduler.lease_next_task(run_id=run_id, worker_id=self.worker_id)
         if task is None:
             return None
@@ -123,6 +135,15 @@ class LocalWorker:
             self._log.info("task_failed", extra={"run_id": run_id, "task_id": task.task_id})
             self._hooks.fire("after_task_failure", task=task, error=exc)
             self._hooks.fire("on_run_status_changed", run_id=run_id, status=run_status)
+            if attempt_count < self._resolve_max_attempts(task):
+                delay = self._retry_policy.delay_for_attempt(attempt_count)
+                if delay > 0:
+                    self._log.info(
+                        "task_retry_backoff",
+                        extra={"run_id": run_id, "task_id": task.task_id,
+                               "attempt": attempt_count, "delay_seconds": delay},
+                    )
+                    time.sleep(delay)
             raise
 
         wall_seconds = round(time.monotonic() - started, 3)
@@ -160,12 +181,8 @@ class LocalWorker:
         timeout_seconds: int | None,
     ) -> dict[str, object]:
         if timeout_seconds is None:
-            return handler(task)
-        executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(handler, task)
-        # shutdown(wait=False) detaches executor so the worker is not blocked when
-        # future.result() times out — the underlying thread continues until handler returns.
-        executor.shutdown(wait=False)
+            return self._sandbox.run(handler, task)
+        future = self._executor.submit(self._sandbox.run, handler, task)
         try:
             return future.result(timeout=timeout_seconds)
         except FuturesTimeoutError:
