@@ -122,3 +122,84 @@ class TestJsonFormatterExceptions:
         raw = formatter.format(record)
         parsed = json.loads(raw)
         assert parsed["level"] == "ERROR"
+
+
+class TestJsonFormatterExtraFields:
+    """extra= fields must all appear in JSON — not just the 3-key whitelist."""
+
+    def test_arbitrary_extra_field_included(self):
+        """Any field in extra={} must survive into the JSON payload."""
+        formatter = JsonFormatter()
+        record = _make_record(extra={"task_count": 72, "gpu_peak_mb": 4200.5})
+        payload = json.loads(formatter.format(record))
+        assert payload["task_count"] == 72, (
+            "task_count was passed via extra= but is absent from JSON — "
+            "only the 3-key whitelist was extracted (regression)"
+        )
+        assert payload["gpu_peak_mb"] == 4200.5
+
+    def test_hook_error_context_fields_included(self):
+        """hooks.py logs 'hook_error' with point/hook/error/traceback — all must appear."""
+        formatter = JsonFormatter()
+        record = _make_record(
+            msg="hook_error",
+            level=logging.WARNING,
+            extra={
+                "point": "after_task_success",
+                "hook": "GPUMemoryHook.after_task_success",
+                "error": "CUDA out of memory",
+                "traceback": "Traceback (most recent call last):\n  ...",
+            },
+        )
+        payload = json.loads(formatter.format(record))
+        assert payload["point"] == "after_task_success"
+        assert payload["hook"] == "GPUMemoryHook.after_task_success"
+        assert payload["error"] == "CUDA out of memory"
+        assert "Traceback" in payload["traceback"]
+
+    def test_run_created_context_fields_included(self):
+        """runner.py logs run_created with run_id + task_count — task_count must appear."""
+        formatter = JsonFormatter()
+        record = _make_record(extra={"run_id": "abc123", "task_count": 12})
+        payload = json.loads(formatter.format(record))
+        assert payload["run_id"] == "abc123"
+        assert payload["task_count"] == 12
+
+    def test_builtin_logrecord_attrs_not_duplicated(self):
+        """Standard LogRecord attrs (levelno, lineno, etc.) must not leak into payload."""
+        formatter = JsonFormatter()
+        payload = json.loads(formatter.format(_make_record()))
+        # These are internal LogRecord attrs — they should not appear in JSON
+        assert "levelno" not in payload
+        assert "lineno" not in payload
+        assert "pathname" not in payload
+        assert "process" not in payload
+        assert "thread" not in payload
+
+    def test_non_serializable_extra_field_does_not_crash(self):
+        """Non-JSON-serializable types (datetime, enum, custom class) must not raise."""
+        from datetime import datetime, timezone
+        from enum import Enum
+
+        class Color(Enum):
+            RED = 1
+
+        formatter = JsonFormatter()
+        record = _make_record(extra={
+            "started_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+            "color": Color.RED,
+        })
+        # Must not raise — uses _json_default fallback
+        raw = formatter.format(record)
+        payload = json.loads(raw)
+        assert "started_at" in payload
+        assert "color" in payload
+
+    def test_private_underscore_fields_excluded(self):
+        """Fields starting with _ must not appear — they are internal to logging."""
+        formatter = JsonFormatter()
+        record = _make_record()
+        # logging sets some internal _ attrs; none should appear in JSON
+        payload = json.loads(formatter.format(record))
+        for key in payload:
+            assert not key.startswith("_"), f"Private field {key!r} leaked into JSON"
