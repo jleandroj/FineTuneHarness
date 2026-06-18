@@ -123,6 +123,11 @@ class LocalWorker:
         working_task = dataclasses.replace(task, payload=dict(task.payload))
 
         self._hooks.fire("before_task", task=working_task)
+        self._store.append_event(EventRecord(
+            event_id=uuid.uuid4().hex, run_id=run_id, task_id=task.task_id,
+            kind="hook_fired",
+            payload={"point": "before_task", "hooks": self._hooks.hook_names("before_task")},
+        ))
 
         timeout_seconds = self._resolve_timeout(working_task)
 
@@ -143,6 +148,11 @@ class LocalWorker:
             run_status = self._runner.refresh_run_status(run_id)
             self._log.info("task_timed_out", extra={"run_id": run_id, "task_id": task.task_id})
             self._hooks.fire("after_task_timeout", task=working_task)
+            self._store.append_event(EventRecord(
+                event_id=uuid.uuid4().hex, run_id=run_id, task_id=task.task_id,
+                kind="hook_fired",
+                payload={"point": "after_task_timeout", "hooks": self._hooks.hook_names("after_task_timeout")},
+            ))
             self._hooks.fire("on_run_status_changed", run_id=run_id, status=run_status)
             raise
         except Exception as exc:
@@ -177,6 +187,11 @@ class LocalWorker:
             run_status = self._runner.refresh_run_status(run_id)
             self._log.info("task_failed", extra={"run_id": run_id, "task_id": task.task_id})
             self._hooks.fire("after_task_failure", task=working_task, error=exc)
+            self._store.append_event(EventRecord(
+                event_id=uuid.uuid4().hex, run_id=run_id, task_id=task.task_id,
+                kind="hook_fired",
+                payload={"point": "after_task_failure", "hooks": self._hooks.hook_names("after_task_failure")},
+            ))
             self._hooks.fire("on_run_status_changed", run_id=run_id, status=run_status)
             if attempt_count < self._resolve_max_attempts(working_task):
                 delay = self._retry_policy.delay_for_attempt(attempt_count)
@@ -203,6 +218,11 @@ class LocalWorker:
         # result. HookRegistry.fire() is fire-and-forget: a crashing hook is
         # logged and skipped, so the store write always completes.
         self._hooks.fire("after_task_success", task=working_task, result=result)
+        self._store.append_event(EventRecord(
+            event_id=uuid.uuid4().hex, run_id=run_id, task_id=task.task_id,
+            kind="hook_fired",
+            payload={"point": "after_task_success", "hooks": self._hooks.hook_names("after_task_success")},
+        ))
         self._store.update_task_status(task.task_id, TaskStatus.SUCCEEDED, result=result)
         if self._artifact_store is not None:
             self._artifact_store.write_json_artifact(
