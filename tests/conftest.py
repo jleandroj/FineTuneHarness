@@ -17,6 +17,31 @@ BASE_CONFIG = {
 }
 
 
+def _cuda_available() -> bool:
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def pytest_configure(config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "gpu: requires a real CUDA GPU (and torch); skipped automatically otherwise.",
+    )
+
+
+def pytest_collection_modifyitems(config, items) -> None:
+    if _cuda_available():
+        return
+    skip_gpu = pytest.mark.skip(reason="no CUDA GPU available")
+    for item in items:
+        if "gpu" in item.keywords:
+            item.add_marker(skip_gpu)
+
+
 @pytest.fixture
 def base_config() -> dict:
     return dict(BASE_CONFIG)

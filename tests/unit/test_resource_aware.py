@@ -69,6 +69,17 @@ def _h_ok(task):
     return {"accuracy": 0.9, "f1": 0.88}
 
 
+def _h_framework_draw(task):
+    """Record torch + numpy global-RNG draws (the harness seeds both before us)."""
+    import numpy as np
+    import torch
+
+    d = Path(task.payload["obs_dir"])
+    value = f"{torch.rand(3).tolist()}|{np.random.rand(3).tolist()}"
+    (d / task.task_key).write_text(value)
+    return {"accuracy": 0.9, "f1": 0.88}
+
+
 def _h_hard_exit(task):
     """Die without reporting (simulates an OS OOM-kill) after the task is RUNNING."""
     os._exit(137)
@@ -220,6 +231,28 @@ def test_is_oom_error_detects_cuda_messages() -> None:
 
     assert is_oom_error(OutOfMemoryError("boom"))
     assert not is_oom_error(ValueError("unrelated failure"))
+    # A system-RAM OOM ("Out of memory: Killed process") must NOT be misread as a
+    # GPU OOM — GPU concurrency backoff would not help it.
+    assert not is_oom_error(RuntimeError("Out of memory: Killed process 1234"))
+
+
+def test_is_oom_error_matches_real_torch_type() -> None:
+    """Anchor detection to the real torch.cuda.OutOfMemoryError (constructible
+    without a GPU), not just a name string."""
+    import torch
+
+    assert is_oom_error(torch.cuda.OutOfMemoryError("CUDA out of memory"))
+
+
+@pytest.mark.gpu
+def test_real_cuda_oom_is_classified() -> None:
+    """A genuine CUDA OOM from an absurd allocation is classified by is_oom_error."""
+    import torch
+
+    with pytest.raises(torch.cuda.OutOfMemoryError) as excinfo:
+        # Far larger than any GPU; forces a real OutOfMemoryError.
+        _ = torch.empty((1_000_000, 1_000_000, 64), dtype=torch.float32, device="cuda")
+    assert is_oom_error(excinfo.value)
 
 
 # ── store guard ──────────────────────────────────────────────────────────────
@@ -362,6 +395,32 @@ def test_seeding_is_deterministic_under_concurrency(tmp_path: Path) -> None:
     # All tasks share one seed -> one identical draw, stable across both runs.
     assert len(run_a) == 1, f"per-task RNG not isolated: {run_a}"
     assert run_a == run_b, "not reproducible across runs"
+
+
+def test_torch_and_numpy_seeding_is_deterministic(tmp_path: Path) -> None:
+    """Determinism covers torch + numpy global RNGs (not just stdlib random): the
+    harness seeds all three before each task, isolated per process."""
+    def _execute_once(tag: str) -> set[str]:
+        out = tmp_path / tag
+        out.mkdir()
+        store = SQLiteStateStore(tmp_path / f"{tag}.db")
+        runner = FineTuneRunner(store)
+        run_id = runner.create_run(
+            name=tag, config=_CONFIG,
+            tasks=[{"task_key": f"t{i}", "obs_dir": str(out)} for i in range(4)],
+        )
+        worker = LocalWorker(worker_id="w", store=store)
+        worker.drain_concurrent(
+            run_id=run_id, handler=_h_framework_draw,
+            concurrency=_resource_aware(max_concurrent=3),
+            monitor=_FakeMonitor(50000),
+        )
+        return {f.read_text() for f in out.iterdir()}
+
+    run_a = _execute_once("ta")
+    run_b = _execute_once("tb")
+    assert len(run_a) == 1, f"torch/numpy RNG not isolated per task: {run_a}"
+    assert run_a == run_b, "torch/numpy draws not reproducible across runs"
 
 
 # ── OOM handling ─────────────────────────────────────────────────────────────

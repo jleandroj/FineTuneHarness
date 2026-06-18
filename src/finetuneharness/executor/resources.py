@@ -42,12 +42,20 @@ _OOM_MARKERS = (
 def is_oom_error(exc: BaseException) -> bool:
     """True if *exc* looks like a GPU/CUDA out-of-memory error.
 
-    Priority is the exception *type*: ``torch.cuda.OutOfMemoryError`` (matched by
-    class name, without importing torch). Otherwise fall back to CUDA-specific
-    message markers — deliberately NOT the bare "out of memory", which a system
-    RAM OOM also carries (GPU concurrency backoff would not help that case).
-    Also handles the FirejailSandbox flattening ("...: OutOfMemoryError: ...").
+    Priority is the exception *type*. If torch is importable we anchor on the real
+    ``torch.cuda.OutOfMemoryError`` via ``isinstance`` (robust to subclasses); we
+    also match by class name so detection works without importing torch and across
+    the FirejailSandbox flattening ("...: OutOfMemoryError: ..."). Only then fall
+    back to CUDA-specific message markers — deliberately NOT the bare "out of
+    memory", which a system RAM OOM also carries (GPU backoff would not help that).
     """
+    try:
+        import torch  # noqa: PLC0415 — optional, only when present
+
+        if isinstance(exc, torch.cuda.OutOfMemoryError):
+            return True
+    except Exception:
+        pass
     if type(exc).__name__ in ("OutOfMemoryError", "CudaOutOfMemoryError"):
         return True
     msg = str(exc).lower()
