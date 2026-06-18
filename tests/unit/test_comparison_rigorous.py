@@ -136,7 +136,7 @@ def test_compare_runs_rejects_different_dataset_hash():
     report = compare_runs([run1, run2], store)
 
     errors = [i for i in report.comparability_issues if i.severity == "error"]
-    assert any(i.field == "dataset_hash" for i in errors)
+    assert any(i.field == "dataset_hashes" for i in errors)
     assert any("dataset_hash" in i.message for i in errors)
 
 

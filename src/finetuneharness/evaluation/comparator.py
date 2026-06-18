@@ -74,16 +74,20 @@ def check_comparability(run_a: RunRecord, run_b: RunRecord) -> list[Comparabilit
     """
     issues: list[ComparabilityIssue] = []
 
-    # dataset_hash — ERROR if both present and different
-    hash_a = run_a.config.get("dataset_hash")
-    hash_b = run_b.config.get("dataset_hash")
-    if hash_a is not None and hash_b is not None and hash_a != hash_b:
+    # dataset_hashes — ERROR if both populated and different.
+    # Use the first-class RunRecord.dataset_hashes field (always populated from
+    # either dataset_hash or datasets at create_run time) rather than
+    # config.get("dataset_hash"), which is absent for runs that used the
+    # datasets-dict form and would silently skip the check.
+    hashes_a = run_a.dataset_hashes
+    hashes_b = run_b.dataset_hashes
+    if hashes_a and hashes_b and hashes_a != hashes_b:
         issues.append(ComparabilityIssue(
             severity="error",
-            field="dataset_hash",
-            baseline_value=hash_a,
-            compare_value=hash_b,
-            message=f"dataset_hash differs: {hash_a!r} vs {hash_b!r} — results measure different data",
+            field="dataset_hashes",
+            baseline_value=hashes_a,
+            compare_value=hashes_b,
+            message=f"dataset_hashes differ — results measure different data: {hashes_a} vs {hashes_b}",
         ))
 
     # seed — WARNING if both present and different

@@ -7,7 +7,9 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Callable
 
 from finetuneharness.artifacts.store import ArtifactStore
+from finetuneharness.evaluation.validator import ResultStatus, validate_result
 from finetuneharness.executor.policy import NoSandbox, RetryPolicy, SandboxPolicy, TimeoutPolicy
+from finetuneharness.executor.seeding import apply_seed
 from finetuneharness.observability.logging import get_logger
 from finetuneharness.orchestrator.hooks import HookRegistry
 from finetuneharness.orchestrator.runner import FineTuneRunner
@@ -17,6 +19,29 @@ from finetuneharness.state.store import StateStore
 
 
 TaskHandler = Callable[[TaskRecord], dict[str, object]]
+
+
+class DegradedRunError(Exception):
+    """Raised by drain() when one or more tasks failed or timed out.
+
+    All tasks were attempted; this error summarises the failures so the caller
+    can decide whether to abort or accept partial results.
+    """
+
+    def __init__(
+        self,
+        run_id: str,
+        failed_tasks: list[TaskRecord],
+        succeeded: int,
+    ) -> None:
+        self.run_id = run_id
+        self.failed_tasks = failed_tasks
+        self.succeeded = succeeded
+        keys = [t.task_key for t in failed_tasks]
+        total = succeeded + len(failed_tasks)
+        super().__init__(
+            f"{len(failed_tasks)}/{total} tasks failed in run {run_id}: {keys}"
+        )
 
 
 class LocalWorker:
@@ -83,6 +108,13 @@ class LocalWorker:
         self._hooks.fire("before_task", task=task)
 
         timeout_seconds = self._resolve_timeout(task)
+
+        # Apply seed before every handler call so the handler doesn't have to.
+        # The harness owns seed enforcement; the handler sees a reproducible state.
+        _run = self._store.get_run(run_id)
+        if _run is not None and _run.seed is not None:
+            apply_seed(_run.seed)
+
         started = time.monotonic()
         try:
             result = self._execute(handler, task, timeout_seconds)
@@ -150,6 +182,11 @@ class LocalWorker:
         if "wall_seconds" not in result:
             result = {**result, "wall_seconds": wall_seconds}
 
+        outcome = validate_result(result, method=task.payload.get("method"))
+        result = {**result, "_validation_status": outcome.status.value}
+        if outcome.status in (ResultStatus.DEGENERATE_RESULT, ResultStatus.FAILED_VALIDATION):
+            result["_validation_errors"] = outcome.validation_errors
+
         self._store.update_task_status(task.task_id, TaskStatus.SUCCEEDED, result=result)
         if self._artifact_store is not None:
             self._artifact_store.write_json_artifact(
@@ -173,6 +210,33 @@ class LocalWorker:
         self._hooks.fire("after_task_success", task=task, result=result)
         self._hooks.fire("on_run_status_changed", run_id=run_id, status=run_status)
         return task
+
+    def drain(self, *, run_id: str, handler: TaskHandler) -> int:
+        """Run all pending tasks in a run, continuing past individual failures.
+
+        Returns the number of tasks that succeeded. Raises DegradedRunError at
+        the end (not mid-loop) if any tasks ended in FAILED or TIMED_OUT, so
+        the caller always gets a complete grid run before learning about errors.
+        """
+        succeeded = 0
+        while True:
+            try:
+                task = self.run_once(run_id=run_id, handler=handler)
+                if task is None:
+                    break
+                succeeded += 1
+            except Exception:
+                pass  # status + event already recorded by run_once; keep going
+
+        failed_tasks = [
+            t for t in self._store.list_tasks(run_id)
+            if t.status in (TaskStatus.FAILED, TaskStatus.TIMED_OUT)
+        ]
+        if failed_tasks:
+            raise DegradedRunError(
+                run_id=run_id, failed_tasks=failed_tasks, succeeded=succeeded
+            )
+        return succeeded
 
     def _execute(
         self,
