@@ -22,6 +22,12 @@ def validate_run_config(config: dict[str, Any]) -> None:
     executor = config.get("executor")
     if not isinstance(executor, dict):
         raise ValueError("run config 'executor' must be a dict")
+    if "max_workers" in executor:
+        mw = executor["max_workers"]
+        if not isinstance(mw, int) or mw < 1:
+            raise ValueError(
+                f"run config 'executor.max_workers' must be a positive int, got {mw!r}"
+            )
 
     artifacts = config.get("artifacts")
     if not isinstance(artifacts, dict):

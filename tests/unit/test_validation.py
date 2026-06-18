@@ -70,3 +70,32 @@ def test_artifacts_root_empty_raises() -> None:
     cfg = {**_VALID, "artifacts": {"root": ""}}
     with pytest.raises(ValueError, match="artifacts.root"):
         validate_run_config(cfg)
+
+
+def test_executor_max_workers_valid_int_passes() -> None:
+    cfg = {**_VALID, "executor": {"kind": "local", "max_workers": 8}}
+    validate_run_config(cfg)  # must not raise
+
+
+def test_executor_max_workers_zero_raises() -> None:
+    cfg = {**_VALID, "executor": {"kind": "local", "max_workers": 0}}
+    with pytest.raises(ValueError, match="max_workers"):
+        validate_run_config(cfg)
+
+
+def test_executor_max_workers_negative_raises() -> None:
+    cfg = {**_VALID, "executor": {"kind": "local", "max_workers": -2}}
+    with pytest.raises(ValueError, match="max_workers"):
+        validate_run_config(cfg)
+
+
+def test_executor_max_workers_string_raises() -> None:
+    cfg = {**_VALID, "executor": {"kind": "local", "max_workers": "8"}}
+    with pytest.raises(ValueError, match="max_workers"):
+        validate_run_config(cfg)
+
+
+def test_executor_max_workers_absent_passes() -> None:
+    """max_workers is optional — omitting it must not raise."""
+    cfg = {**_VALID, "executor": {"kind": "local"}}
+    validate_run_config(cfg)

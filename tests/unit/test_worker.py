@@ -146,3 +146,16 @@ def test_worker_stamps_degenerate_on_adapter_not_loaded(tmp_path: Path) -> None:
     assert task.status == TaskStatus.SUCCEEDED
     assert task.result["_validation_status"] == "DEGENERATE_RESULT"
     assert any("adapter_loaded" in e for e in task.result["_validation_errors"])
+
+
+def test_worker_max_workers_passed_to_thread_pool(tmp_path: Path) -> None:
+    """max_workers must be wired through to the ThreadPoolExecutor, not hardcoded."""
+    store, run_id = _make_run(tmp_path, ["t1"])
+    worker = LocalWorker(worker_id="w", store=store, max_workers=2)
+    assert worker._executor._max_workers == 2
+
+
+def test_worker_default_max_workers_is_4(tmp_path: Path) -> None:
+    store, run_id = _make_run(tmp_path, ["t1"])
+    worker = LocalWorker(worker_id="w", store=store)
+    assert worker._executor._max_workers == 4

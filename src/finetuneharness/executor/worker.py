@@ -67,6 +67,7 @@ class LocalWorker:
         scheduler: TaskScheduler | None = None,
         hooks: HookRegistry | None = None,
         sandbox: SandboxPolicy | None = None,
+        max_workers: int = 4,
     ) -> None:
         self.worker_id = worker_id
         self._store = store
@@ -79,7 +80,7 @@ class LocalWorker:
         self._sandbox: SandboxPolicy = sandbox or NoSandbox()
         self._log = get_logger("finetuneharness.worker")
         self._executor = ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix=f"worker-{worker_id}"
+            max_workers=max_workers, thread_name_prefix=f"worker-{worker_id}"
         )
         self._started_runs: set[str] = set()
 
