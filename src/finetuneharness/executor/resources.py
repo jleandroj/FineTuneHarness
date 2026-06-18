@@ -85,12 +85,15 @@ class ConcurrencyConfig:
 
 @runtime_checkable
 class ResourceMonitor(Protocol):
-    def free_gpu_memory_mb(self) -> float | None:
-        """Free GPU memory in MB, or None when no GPU is visible/detectable.
-
-        A None return tells the scheduler to fall back to sequential draining —
-        there is no resource signal to gate concurrency on (e.g. CPU-only CI).
+    def free_memory_per_device(self) -> list[float] | None:
+        """Free MB for each physical GPU (index-aligned), or None when no GPU is
+        visible/detectable. A None return tells the scheduler to fall back to
+        sequential draining — there is no resource signal to gate on (e.g. CPU CI).
         """
+        ...
+
+    def free_gpu_memory_mb(self) -> float | None:
+        """Free MB on the most-constrained device (min across devices), or None."""
         ...
 
 
@@ -136,7 +139,7 @@ class NvmlMonitor:
                 },
             )
 
-    def free_gpu_memory_mb(self) -> float | None:
+    def free_memory_per_device(self) -> list[float] | None:
         if self._pynvml is not None:
             try:
                 p = self._pynvml
@@ -149,12 +152,16 @@ class NvmlMonitor:
                     handle = p.nvmlDeviceGetHandleByIndex(i)
                     mem = p.nvmlDeviceGetMemoryInfo(handle)
                     frees.append(mem.free / (1024 * 1024))
-                return min(frees) if frees else None
+                return frees or None
             except Exception:
                 self._log.warning("nvml_query_failed_falling_back_to_smi")
-        return self._nvidia_smi_free_mb()
+        return self._nvidia_smi_per_device()
 
-    def _nvidia_smi_free_mb(self) -> float | None:
+    def free_gpu_memory_mb(self) -> float | None:
+        per = self.free_memory_per_device()
+        return min(per) if per else None
+
+    def _nvidia_smi_per_device(self) -> list[float] | None:
         if shutil.which("nvidia-smi") is None:
             return None
         try:
@@ -179,4 +186,4 @@ class NvmlMonitor:
             except ValueError:
                 continue
         self._warn_if_multigpu(len(vals))
-        return min(vals) if vals else None
+        return vals or None

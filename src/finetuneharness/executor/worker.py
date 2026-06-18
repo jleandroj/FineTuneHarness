@@ -6,6 +6,7 @@ import os
 import queue as _queue
 import time
 import uuid
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
@@ -119,6 +120,8 @@ class LocalWorker:
         scheduler: TaskScheduler | None = None,
         hooks: HookRegistry | None = None,
         sandbox: SandboxPolicy | None = None,
+        hooks_factory: str | None = None,
+        sandbox_factory: str | None = None,
     ) -> None:
         self.worker_id = worker_id
         self._store = store
@@ -127,8 +130,18 @@ class LocalWorker:
         self._timeout_policy = timeout_policy or TimeoutPolicy()
         self._scheduler = scheduler or TaskScheduler(store)
         self._runner = runner or FineTuneRunner(store)
-        self._hooks = hooks or HookRegistry()
-        self._sandbox: SandboxPolicy = sandbox or NoSandbox()
+        # hooks/sandbox factories are importable 'module:function' specs that BUILD a
+        # HookRegistry / SandboxPolicy. drain_concurrent needs them: spawned children
+        # rebuild the worker, and a factory is the only thing picklable enough to
+        # recreate hooks/sandbox in the child (concrete objects with loggers/closures
+        # are not). When a factory is given it also builds the parent's instance, so
+        # parent and children are guaranteed identical.
+        self._hooks_factory = hooks_factory
+        self._sandbox_factory = sandbox_factory
+        self._hooks = _call_factory(hooks_factory) if hooks_factory else (hooks or HookRegistry())
+        self._sandbox: SandboxPolicy = (
+            _call_factory(sandbox_factory) if sandbox_factory else (sandbox or NoSandbox())
+        )
         self._log = get_logger("finetuneharness.worker")
         # No shared pool: each timed task gets a fresh single-use executor in
         # _execute so a hung handler cannot starve later tasks.
@@ -496,24 +509,29 @@ class LocalWorker:
     ) -> int:
         """Drain a run with resource-aware, PROCESS-ISOLATED concurrency.
 
-        Each admitted task runs ``run_once`` in its own forked process, so the
+        Each admitted task runs ``run_once`` in its own spawned process, so the
         per-task seed (which mutates process-global numpy/torch/random RNG) is
-        isolated — reproducibility is preserved. (Thread-based concurrency would
-        share one global RNG across tasks and corrupt it.) A new task is admitted
-        only while the live in-flight count is below the dynamic ceiling AND free
-        GPU memory is above ``min_free_mb``; the first task is always admitted so a
-        busy GPU cannot deadlock the run. On a GPU OOM the task is requeued by
-        ``_handle_oom`` (budget tracked via persisted events) and the ceiling is
-        lowered, converging toward sequential under memory pressure.
+        isolated — reproducibility is preserved. A task is admitted to a GPU only
+        while that device has free memory above ``min_free_mb`` (the first task on an
+        idle device is always admitted), up to the dynamic ceiling. On a GPU OOM the
+        task is requeued by ``_handle_oom`` and the ceiling is lowered, converging
+        toward sequential under memory pressure.
+
+        Multi-GPU: admission is per-device — each child is pinned to a chosen GPU via
+        CUDA_VISIBLE_DEVICES and gated on THAT device's free memory, distributing
+        tasks across devices.
 
         Like ``drain``, returns the count of succeeded tasks and raises
         ``DegradedRunError`` if any task ended FAILED/TIMED_OUT/DEGENERATE.
 
-        Requires a persistent (SQLite) store — child processes reopen it to share
-        state. If the monitor reports no GPU (``free_gpu_memory_mb() is None``),
-        there is no signal to gate on, so this degrades to sequential ``drain``.
+        Requires a persistent (SQLite) store — children reopen it to share state.
+        Custom hooks/sandbox must be supplied as importable factories
+        (``hooks_factory``/``sandbox_factory``) so children can recreate them;
+        otherwise this raises (concrete hooks/sandbox cannot cross to a spawned
+        child). If the monitor reports no GPU, this degrades to sequential ``drain``.
         """
-        if monitor.free_gpu_memory_mb() is None:
+        per_device = monitor.free_memory_per_device()
+        if per_device is None:
             self._log.info("no_gpu_detected_draining_sequentially", extra={"run_id": run_id})
             return self.drain(run_id=run_id, handler=handler, stop_fn=stop_fn)
 
@@ -524,9 +542,24 @@ class LocalWorker:
                 "runs in its own process and shares state through the database. "
                 "Use SQLiteStateStore, or call drain() for in-memory/sequential runs."
             )
+        # Consistency guard: spawned children rebuild the worker, so concrete custom
+        # hooks/sandbox would silently NOT run in concurrent mode. Require factories.
+        if self._hooks_factory is None and self._hooks.total() > 0:
+            raise RuntimeError(
+                "drain_concurrent: this worker has custom hooks that cannot reach "
+                "spawned children. Pass hooks_factory='module:function' (a factory that "
+                "rebuilds the HookRegistry) so each child recreates them, or use drain()."
+            )
+        if self._sandbox_factory is None and not isinstance(self._sandbox, NoSandbox):
+            raise RuntimeError(
+                "drain_concurrent: this worker has a non-default sandbox that cannot "
+                "reach spawned children. Pass sandbox_factory='module:function', "
+                "or use drain()."
+            )
 
         self._max_oom_retries = concurrency.max_oom_retries
         db_path = str(self._store._path)
+        num_devices = len(per_device)
 
         # Run-start bookkeeping ONCE in the parent, before spawning any child. The
         # cached seed is passed to each child so its run_once applies the seed but
@@ -539,44 +572,53 @@ class LocalWorker:
         self._record_drain_started(run_id, concurrency)
         seed = self._run_seeds.get(run_id)
 
-        # 'spawn' (NOT 'fork'): a fresh interpreter per task. fork would inherit any
-        # CUDA context already initialized in this parent (e.g. by importing the
-        # handler module) and hand children a corrupted context — the classic
-        # CUDA-after-fork crash. spawn pickles the target + args, so the handler must
-        # be importable (module:function), like FirejailSandbox. Children rebuild a
-        # default-hooks/-sandbox worker from db_path; custom hooks/sandbox do not
-        # propagate to children (documented limitation of concurrent mode).
+        # 'spawn' (NOT 'fork'): a fresh interpreter per task never inherits a CUDA
+        # context the parent may have created, avoiding the CUDA-after-fork crash.
         ctx = mp.get_context("spawn")
         result_q: mp.Queue = ctx.Queue()
+
+        def _free_for(device: int, live: list[float]) -> float:
+            return live[device] if device < len(live) else 0.0
 
         succeeded = 0
         stopped = False
         child_seq = 0
         ceiling = max(1, concurrency.max_concurrent)
         min_free = concurrency.min_free_mb
-        in_flight: dict[int, tuple[mp.Process, str]] = {}
+        # pid -> (Process, worker_id, device_index)
+        in_flight: dict[int, tuple[mp.Process, str, int]] = {}
         try:
             while True:
-                # ── Admission ──────────────────────────────────────────────
+                # ── Admission (per-device) ─────────────────────────────────
                 while (
                     not stopped
                     and len(in_flight) < ceiling
                     and self._count_leaseable(run_id) > 0
                 ):
-                    free = monitor.free_gpu_memory_mb()
-                    # Gate on memory only once at least one task is already running —
-                    # the first admission must always proceed.
-                    if free is not None and in_flight and free < min_free:
-                        break
+                    live = monitor.free_memory_per_device() or per_device
+                    inflight_by_dev: Counter[int] = Counter(d for _, _, d in in_flight.values())
+                    order = sorted(range(num_devices), key=lambda d: _free_for(d, live), reverse=True)
+                    # Prefer an idle device (first task there always proceeds); else a
+                    # busy device that still clears the memory headroom.
+                    device = next((d for d in order if inflight_by_dev[d] == 0), None)
+                    if device is None:
+                        device = next(
+                            (d for d in order if _free_for(d, live) >= min_free), None
+                        )
+                    if device is None:
+                        break  # all devices busy and none has headroom; wait
+
                     child_seq += 1
                     child_wid = f"{self.worker_id}-c{child_seq}"
                     proc = ctx.Process(
                         target=_run_once_subprocess,
                         args=(db_path, run_id, child_wid, handler, seed,
-                              self._max_oom_retries, result_q),
+                              self._max_oom_retries, self._hooks_factory,
+                              self._sandbox_factory,
+                              device if num_devices > 1 else None, result_q),
                     )
                     proc.start()
-                    in_flight[proc.pid] = (proc, child_wid)
+                    in_flight[proc.pid] = (proc, child_wid, device)
                     # Let the just-admitted task allocate before re-reading memory.
                     if concurrency.settle_seconds > 0:
                         time.sleep(concurrency.settle_seconds)
@@ -594,7 +636,7 @@ class LocalWorker:
                     # ever recovers. Recover it explicitly via the child's worker_id:
                     # requeue (retry) or, once the reclaim budget is spent, FAIL it so
                     # the run terminates instead of hanging on a lost task.
-                    for dead_pid, (dead, dead_wid) in list(in_flight.items()):
+                    for dead_pid, (dead, dead_wid, _dev) in list(in_flight.items()):
                         if not dead.is_alive():
                             dead.join()
                             del in_flight[dead_pid]
@@ -630,7 +672,7 @@ class LocalWorker:
         finally:
             # Teardown safety net: join any survivors and recover a task they may
             # have left non-terminal (early stop, or death during join).
-            for proc, wid in in_flight.values():
+            for proc, wid, _dev in in_flight.values():
                 proc.join()
                 self._store.reclaim_dead_worker(
                     run_id=run_id, worker_id=wid, max_reclaims=self._max_oom_retries,
@@ -714,6 +756,20 @@ class LocalWorker:
         return None if raw is None else int(raw)
 
 
+def _call_factory(spec: str):
+    """Import a 'module:function' factory and call it with no args, returning the result.
+
+    Used to (re)build hooks/sandbox identically in the parent and in spawned children.
+    """
+    import importlib
+
+    module_name, _, func_name = spec.partition(":")
+    if not module_name or not func_name:
+        raise ValueError(f"factory spec must be 'module:function', got {spec!r}")
+    fn = getattr(importlib.import_module(module_name), func_name)
+    return fn()
+
+
 def _run_once_subprocess(
     db_path: str,
     run_id: str,
@@ -721,23 +777,36 @@ def _run_once_subprocess(
     handler: TaskHandler,
     seed: int | None,
     max_oom_retries: int,
+    hooks_factory: str | None,
+    sandbox_factory: str | None,
+    gpu_device: int | None,
     result_q: "mp.Queue",
 ) -> None:
     """Module-level entrypoint for a spawned child: run exactly one task.
 
     Must be importable (top-level) because ``spawn`` pickles the target by
     reference. A fresh interpreter means an isolated process-global RNG, which is
-    why drain_concurrent is reproducible. The child rebuilds a default-hooks worker
-    from *db_path* (SQLite is process-safe — fresh connection per call) and runs
-    one ``run_once``; the outcome is relayed to the parent via *result_q*.
+    why drain_concurrent is reproducible. The child rebuilds a worker from *db_path*
+    (SQLite is process-safe — fresh connection per call), recreating hooks/sandbox
+    from the factory specs so behavior matches sequential mode, and runs one
+    ``run_once``; the outcome is relayed to the parent via *result_q*.
+
+    *gpu_device* (when set) is pinned via CUDA_VISIBLE_DEVICES BEFORE the handler can
+    import torch, so the task uses exactly that physical GPU as cuda:0.
 
     The seed is pre-seeded and the run pre-marked started so run_once applies the
     seed without re-firing before_run_start (the parent fired it once).
     """
+    if gpu_device is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_device)
+
     from finetuneharness.state.sqlite import SQLiteStateStore
 
     store = SQLiteStateStore(Path(db_path))
-    worker = LocalWorker(worker_id=worker_id, store=store)
+    worker = LocalWorker(
+        worker_id=worker_id, store=store,
+        hooks_factory=hooks_factory, sandbox_factory=sandbox_factory,
+    )
     worker._max_oom_retries = max_oom_retries
     worker._started_runs.add(run_id)
     worker._run_seeds[run_id] = seed

@@ -97,12 +97,15 @@ tests/unit/      — 42 tests
   Do NOT switch to `fork` or threads (a test asserts `spawn`). Consequences: (1) it
   REQUIRES a persistent `SQLiteStateStore` (children reopen it; InMemory raises
   `TypeError`); (2) handlers must be importable `module:function` (spawn pickles
-  them, like FirejailSandbox); custom hooks/sandbox do NOT propagate to children;
-  (3) the OOM retry budget is counted from persisted `task_oom_requeued` events, not
-  worker memory, since each attempt is a fresh process; (4) `before_run_start` fires
-  once in the parent — children inherit the cached seed and apply it without
-  re-firing. With no GPU detectable (`free_gpu_memory_mb() is None`, e.g. CPU CI) it
-  degrades to sequential `drain`.
+  them, like FirejailSandbox); (3) custom hooks/sandbox must be supplied as importable
+  factories — `LocalWorker(hooks_factory="module:fn", sandbox_factory="module:fn")` —
+  so children recreate them; passing a *concrete* non-default `hooks`/`sandbox` to
+  drain_concurrent RAISES (they cannot cross to a spawned child). A parity test
+  asserts hooks fire equally in both modes; (4) the OOM retry budget is counted from
+  persisted `task_oom_requeued` events, not worker memory, since each attempt is a
+  fresh process; (5) `before_run_start` fires once in the parent — children inherit
+  the cached seed and apply it without re-firing. With no GPU detectable
+  (`free_memory_per_device() is None`, e.g. CPU CI) it degrades to sequential `drain`.
 - **Dead-worker recovery.** A child OS-killed (e.g. OOM-killer) after
   `mark_task_running` dies without reporting and leaves its task RUNNING — which NO
   lease reclaim recovers (reclaim only covers LEASED). drain_concurrent detects the
@@ -120,15 +123,13 @@ tests/unit/      — 42 tests
 - Configure concurrency via `executor.concurrency` (mode/min_free_mb/max_concurrent/
   settle_seconds/max_oom_retries) or CLI flags `--concurrency-mode/--min-free-mb/
   --max-concurrent`. NVML reading needs `pip install -e '.[gpu]'` (pynvml); without
-  it, nvidia-smi is the fallback. **SINGLE-GPU scope:** the monitor gates on the
-  minimum free memory across all physical devices (it does not honor
-  `CUDA_VISIBLE_DEVICES`) and children are NOT pinned per GPU — every child uses
-  cuda:0. On a multi-GPU host it would measure the wrong device and never distribute
-  tasks; it logs a `multi_gpu_not_supported` warning if >1 device is seen. For
-  multi-GPU, run one `finetuneharness run` per GPU (`CUDA_VISIBLE_DEVICES=N`) instead.
-  Note: one GPU ⇒ effectively sequential for jobs that fill it; small jobs that fit
-  can overlap. For multi-host scale, run several `finetuneharness run` processes
-  against the same store — the lease guarantees each task runs exactly once (see
+  it, nvidia-smi is the fallback. **Multi-GPU:** admission is per-device — the monitor
+  reports `free_memory_per_device()`, drain_concurrent picks a device (idle device
+  first, else the one with most free memory that clears `min_free_mb`) and pins each
+  child to it via `CUDA_VISIBLE_DEVICES`, distributing tasks across GPUs. Note: one
+  GPU ⇒ effectively sequential for jobs that fill it; small jobs that fit can overlap.
+  For multi-host scale, run several `finetuneharness run` processes against the same
+  store — the lease guarantees each task runs exactly once (see
   `tests/concurrency/test_multiprocess.py`).
 - Approval gate is ENFORCED: `finetuneharness run` refuses a run with no recorded
   approval (a `run_approved` event from `start-run`) unless `--skip-approval` is

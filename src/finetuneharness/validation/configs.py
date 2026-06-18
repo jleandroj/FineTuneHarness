@@ -90,7 +90,9 @@ def _validate_seed(config: dict[str, Any]) -> None:
             "Set a deterministic seed to enable reproducibility. "
             "Example: {\"seed\": 42}"
         )
-    if not isinstance(seed, int):
+    # bool is a subclass of int — reject it explicitly so True/False can't pose as
+    # a seed (it would seed every RNG with 0/1 and read as a deterministic seed).
+    if isinstance(seed, bool) or not isinstance(seed, int):
         raise ValueError(
             f"run config 'seed' must be an int, got {type(seed).__name__!r}. "
             "Example: {\"seed\": 42}"

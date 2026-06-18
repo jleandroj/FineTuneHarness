@@ -89,6 +89,14 @@ def test_executor_max_workers_is_deprecated_not_fatal() -> None:
             validate_run_config(cfg)
 
 
+def test_seed_bool_rejected() -> None:
+    """bool is a subclass of int but must not pose as a seed."""
+    for bad in (True, False):
+        cfg = {**_VALID, "seed": bad}
+        with pytest.raises(ValueError, match="seed"):
+            validate_run_config(cfg)
+
+
 def test_executor_concurrency_valid_passes() -> None:
     cfg = {**_VALID, "executor": {"kind": "local", "concurrency": {
         "mode": "resource_aware", "min_free_mb": 2000, "max_concurrent": 4,

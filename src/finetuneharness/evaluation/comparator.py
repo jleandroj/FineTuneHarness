@@ -142,11 +142,12 @@ class RunSnapshot:
     status: str
     total_tasks: int
     succeeded: int
-    failed: int
+    failed: int  # FAILED + TIMED_OUT + CANCELLED + DEGENERATE (all non-successes)
     success_rate: float  # NaN when total_tasks == 0
     total_wall_seconds: float | None  # None when no tasks reported timing
     created_at: datetime | None = None
     finished_at: datetime | None = None
+    degenerate: int = 0  # subset of `failed`: handler returned but result was rejected
 
 
 @dataclass
@@ -324,6 +325,7 @@ def compare_runs(
                 TaskStatus.CANCELLED, TaskStatus.DEGENERATE,
             )
         )
+        degenerate = sum(1 for t in tasks if t.status is TaskStatus.DEGENERATE)
         total = len(tasks)
         timed = [
             float(t.result["wall_seconds"])
@@ -337,6 +339,7 @@ def compare_runs(
             total_tasks=total,
             succeeded=succeeded,
             failed=failed,
+            degenerate=degenerate,
             success_rate=succeeded / total if total > 0 else float("nan"),
             total_wall_seconds=round(sum(timed), 3) if timed else None,
             created_at=run.created_at,

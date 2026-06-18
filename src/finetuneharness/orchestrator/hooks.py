@@ -49,6 +49,11 @@ class HookRegistry:
         with self._lock:
             return [getattr(fn, "__qualname__", repr(fn)) for fn in self._hooks.get(point, [])]
 
+    def total(self) -> int:
+        """Total hooks registered across all points (0 == a default/empty registry)."""
+        with self._lock:
+            return sum(len(fns) for fns in self._hooks.values())
+
     def fire(self, point: str, **kwargs: Any) -> None:
         with self._lock:
             fns = list(self._hooks.get(point, []))

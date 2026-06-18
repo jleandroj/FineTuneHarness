@@ -2,6 +2,15 @@
 
 The harness owns seed application so handlers do not need to seed manually.
 torch and numpy are optional — degrades gracefully when not installed.
+
+Per-cell seeding policy: every task (grid cell) in a run is seeded with the SAME
+run-level seed — the worker calls ``apply_seed(run.seed)`` before each task, in
+both sequential and concurrent (per-process) modes. This makes each cell's RNG
+stream reproducible run-to-run, but it does NOT vary the seed per cell: two cells
+that differ only in a non-seeded knob start from identical randomness. A handler
+that needs per-cell-distinct randomness (e.g. different data shuffles per cell)
+must derive its own seed, e.g. ``hash((run_seed, task.task_key))`` or a
+``np.random.default_rng(...)`` keyed on the task.
 """
 from __future__ import annotations
 
