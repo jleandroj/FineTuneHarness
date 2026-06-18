@@ -55,6 +55,13 @@ def _fail(store: InMemoryStateStore, run_id: str, task_key: str) -> None:
     store.update_task_status(task.task_id, TaskStatus.FAILED, error="boom")
 
 
+def _degenerate(store: InMemoryStateStore, run_id: str, task_key: str, result: dict | None = None) -> None:
+    task = next(t for t in store.list_tasks(run_id) if t.task_key == task_key)
+    store.update_task_status(task.task_id, TaskStatus.LEASED)
+    store.update_task_status(task.task_id, TaskStatus.RUNNING)
+    store.update_task_status(task.task_id, TaskStatus.DEGENERATE, result=result or {})
+
+
 # ── 1. RunRecord has created_at ───────────────────────────────────────────────
 
 def test_run_record_has_created_at():
@@ -219,6 +226,60 @@ def test_succeeded_to_failed_is_regression():
     assert "b" in report.regressions
     tc = next(c for c in report.task_comparisons if c.task_key == "b")
     assert tc.is_regression is True
+
+
+# ── 7b. SUCCEEDED → DEGENERATE is a status regression ────────────────────────
+
+def test_succeeded_to_degenerate_is_regression():
+    """A cell that goes from a valid result to a structurally invalid one is the
+    exact regression the comparator must catch — DEGENERATE counts as a failure."""
+    store = InMemoryStateStore()
+    runner = FineTuneRunner(store)
+    run1 = _make_run(runner, "baseline", ["cell"])
+    run2 = _make_run(runner, "compare", ["cell"])
+    _succeed(store, run1, "cell", {"accuracy": 0.85})
+    _degenerate(store, run2, "cell", {"accuracy": 0.40, "adapter_loaded": False})
+
+    report = compare_runs([run1, run2], store)
+
+    assert "cell" in report.regressions
+    tc = report.task_comparisons[0]
+    assert tc.is_regression is True
+
+
+def test_degenerate_to_succeeded_is_improvement():
+    """The symmetric case: recovering from a degenerate result is an improvement."""
+    store = InMemoryStateStore()
+    runner = FineTuneRunner(store)
+    run1 = _make_run(runner, "baseline", ["cell"])
+    run2 = _make_run(runner, "compare", ["cell"])
+    _degenerate(store, run1, "cell", {"accuracy": 0.40, "adapter_loaded": False})
+    _succeed(store, run2, "cell", {"accuracy": 0.85})
+
+    report = compare_runs([run1, run2], store)
+
+    assert "cell" in report.improvements
+    tc = report.task_comparisons[0]
+    assert tc.is_improvement is True
+
+
+def test_degenerate_counted_as_failed_in_snapshot():
+    """A degenerate task is a broken experiment, not missing data — it must be
+    reflected in the run snapshot's failed count and lower the success_rate."""
+    store = InMemoryStateStore()
+    runner = FineTuneRunner(store)
+    run = _make_run(runner, "r", ["a", "b", "c"])
+    _succeed(store, run, "a", {"accuracy": 0.85})
+    _degenerate(store, run, "b", {"adapter_loaded": False})
+    _degenerate(store, run, "c", {"adapter_loaded": False})
+
+    report = compare_runs([run, run], store)
+    snap = report.snapshots[run]
+
+    assert snap.total_tasks == 3
+    assert snap.succeeded == 1
+    assert snap.failed == 2
+    assert snap.success_rate == pytest.approx(1 / 3)
 
 
 # ── 8. Degenerate results are excluded from comparison ───────────────────────

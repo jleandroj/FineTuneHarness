@@ -5,7 +5,9 @@
   },
   "executor": {
     "kind": "local",
-    "max_workers": 4
+    "concurrency": {
+      "mode": "sequential"
+    }
   },
   "artifacts": {
     "root": "./artifacts/ablation"

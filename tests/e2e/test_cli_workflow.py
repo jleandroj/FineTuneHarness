@@ -230,7 +230,7 @@ def test_run_executes_pending_tasks_end_to_end(tmp_path: Path) -> None:
     try:
         out = _invoke(
             "run", "--run-id", run_id, "--state-db", db,
-            "--handler", "cli_handler_mod:handle",
+            "--handler", "cli_handler_mod:handle", "--skip-approval",
         )
         assert "succeeded" in out
 
@@ -250,6 +250,38 @@ def test_run_with_bad_handler_spec_exits(tmp_path: Path) -> None:
         "create-run", "--name", "bad-h", "--config", str(cfg),
         "--tasks", str(tasks), "--state-db", db,
     ).strip()
-    # Missing ':' → SystemExit
+    # Missing ':' → SystemExit (skip approval so we reach the handler-spec check)
     _invoke("run", "--run-id", run_id, "--state-db", db,
-            "--handler", "not_a_valid_spec", expected_exit=1)
+            "--handler", "not_a_valid_spec", "--skip-approval", expected_exit=1)
+
+
+def test_run_refuses_unapproved_run(tmp_path: Path) -> None:
+    """The approval gate is enforced: `run` exits 1 on a run that was not approved."""
+    cfg, tasks = _write_fixtures(tmp_path)
+    db = str(tmp_path / "state.db")
+    run_id = _invoke(
+        "create-run", "--name", "needs-approval", "--config", str(cfg),
+        "--tasks", str(tasks), "--state-db", db,
+    ).strip()
+
+    handler_mod = tmp_path / "approval_handler_mod.py"
+    handler_mod.write_text("def handle(task):\n    return {'accuracy': 0.9, 'f1': 0.88}\n")
+    sys.path.insert(0, str(tmp_path))
+    try:
+        # No start-run → blocked.
+        out = _invoke(
+            "run", "--run-id", run_id, "--state-db", db,
+            "--handler", "approval_handler_mod:handle", expected_exit=1,
+        )
+        assert "not been approved" in out
+
+        # Approve, then run succeeds without --skip-approval.
+        _invoke("start-run", "--run-id", run_id, "--state-db", db, stdin_data="y\n")
+        out = _invoke(
+            "run", "--run-id", run_id, "--state-db", db,
+            "--handler", "approval_handler_mod:handle",
+        )
+        assert "succeeded" in out
+    finally:
+        sys.path.remove(str(tmp_path))
+        sys.modules.pop("approval_handler_mod", None)

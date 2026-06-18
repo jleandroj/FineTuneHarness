@@ -83,13 +83,15 @@ class FineTuneRunner:
         else:
             statuses = {task.status for task in tasks}
             attempted = any(task.attempt_count > 0 for task in tasks)
+            # DEGENERATE is a non-success terminal: the handler returned but the
+            # result failed validation. It must never count toward COMPLETED.
+            unsuccessful = {TaskStatus.FAILED, TaskStatus.TIMED_OUT, TaskStatus.DEGENERATE}
+            in_progress = {TaskStatus.PENDING, TaskStatus.LEASED, TaskStatus.RUNNING}
             if all(status is TaskStatus.SUCCEEDED for status in statuses):
                 target = RunStatus.COMPLETED
-            elif TaskStatus.FAILED in statuses and (TaskStatus.SUCCEEDED in statuses or TaskStatus.PENDING in statuses or TaskStatus.LEASED in statuses or TaskStatus.RUNNING in statuses):
+            elif (statuses & unsuccessful) and (TaskStatus.SUCCEEDED in statuses or (statuses & in_progress)):
                 target = RunStatus.PARTIAL_FAILED
-            elif TaskStatus.TIMED_OUT in statuses and (TaskStatus.SUCCEEDED in statuses or TaskStatus.PENDING in statuses or TaskStatus.LEASED in statuses or TaskStatus.RUNNING in statuses):
-                target = RunStatus.PARTIAL_FAILED
-            elif statuses.issubset({TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.TIMED_OUT}):
+            elif statuses.issubset(unsuccessful | {TaskStatus.CANCELLED}):
                 target = RunStatus.FAILED
             elif TaskStatus.RUNNING in statuses or TaskStatus.LEASED in statuses or TaskStatus.SUCCEEDED in statuses or attempted:
                 target = RunStatus.RUNNING

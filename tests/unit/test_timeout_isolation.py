@@ -54,7 +54,6 @@ def test_hung_handlers_do_not_starve_a_later_task(tmp_path: Path) -> None:
     worker = LocalWorker(
         worker_id="w1", store=store,
         timeout_policy=TimeoutPolicy(timeout_seconds=1),
-        max_workers=2,  # would be exhausted by 2 hangs under the old shared pool
     )
 
     try:

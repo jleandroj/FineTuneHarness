@@ -285,6 +285,23 @@ class SQLiteStateStore(StateStore):
             if cur.rowcount != 1:
                 return None
 
+            # Reclaiming an expired lease inline: emit the audit event here (same
+            # transaction) so silent recovery stays visible without a separate
+            # requeue_expired_leases write-lock on the leasing hot path.
+            if row["status"] == TaskStatus.LEASED.value:
+                conn.execute(
+                    "INSERT INTO events (event_id, run_id, task_id, kind, payload_json, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        uuid.uuid4().hex, run_id, row["task_id"], "lease_expired",
+                        json.dumps(
+                            {"previous_owner": row["lease_owner"], "reclaimed_by": worker_id},
+                            sort_keys=True,
+                        ),
+                        utc_now().isoformat(),
+                    ),
+                )
+
         return TaskRecord(
             task_id=row["task_id"],
             run_id=row["run_id"],

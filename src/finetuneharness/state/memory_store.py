@@ -91,14 +91,25 @@ class InMemoryStateStore(StateStore):
             ):
                 # Claim PENDING tasks, or LEASED tasks whose lease has expired —
                 # matching SQLiteStore's SELECT … OR (status=LEASED AND leased_until < now).
-                if task.status is TaskStatus.PENDING or (
+                reclaimed_expired = (
                     task.status is TaskStatus.LEASED
                     and task.leased_until is not None
                     and task.leased_until < now
-                ):
+                )
+                if task.status is TaskStatus.PENDING or reclaimed_expired:
                     lease = Lease.from_seconds(worker_id, lease_seconds)
                     leased = replace(task, status=TaskStatus.LEASED, lease_owner=worker_id, leased_until=lease.leased_until)
                     self._tasks[task.task_id] = leased
+                    # Inline reclaim emits the audit event here (parity with SQLite),
+                    # so the leasing hot path no longer needs requeue_expired_leases.
+                    if reclaimed_expired:
+                        self._events.append(EventRecord(
+                            event_id=uuid.uuid4().hex,
+                            run_id=run_id,
+                            task_id=task.task_id,
+                            kind="lease_expired",
+                            payload={"previous_owner": task.lease_owner, "reclaimed_by": worker_id},
+                        ))
                     return leased
         return None
 

@@ -14,6 +14,7 @@ _FAIL_STATUSES = frozenset({
     TaskStatus.FAILED.value,
     TaskStatus.TIMED_OUT.value,
     TaskStatus.CANCELLED.value,
+    TaskStatus.DEGENERATE.value,
     "missing",
 })
 _OK_STATUSES = frozenset({TaskStatus.SUCCEEDED.value})
@@ -318,7 +319,10 @@ def compare_runs(
         succeeded = sum(1 for t in tasks if t.status is TaskStatus.SUCCEEDED)
         failed = sum(
             1 for t in tasks
-            if t.status in (TaskStatus.FAILED, TaskStatus.TIMED_OUT, TaskStatus.CANCELLED)
+            if t.status in (
+                TaskStatus.FAILED, TaskStatus.TIMED_OUT,
+                TaskStatus.CANCELLED, TaskStatus.DEGENERATE,
+            )
         )
         total = len(tasks)
         timed = [

@@ -11,6 +11,12 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
+# Resource-aware concurrency reads free GPU memory via NVML. Optional: without it
+# (and without nvidia-smi) the monitor reports no GPU and draining falls back to
+# sequential.
+gpu = [
+  "pynvml>=11.5",
+]
 dev = [
   "pytest>=8.2",
   "ruff>=0.5",

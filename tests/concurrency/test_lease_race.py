@@ -82,7 +82,8 @@ def test_stranded_leased_task_is_completed_by_second_worker(tmp_path: Path) -> N
     task_state = store.list_tasks(run_id)[0]
     assert task_state.status == TaskStatus.LEASED
 
-    # Worker 2 uses scheduler which calls requeue_expired_leases first
+    # Worker 2 leases the stranded task: lease_next_pending_task reclaims the
+    # expired lease inline (and emits a 'lease_expired' audit event).
     worker2 = LocalWorker(worker_id="w2", store=store)
     completed = worker2.run_once(run_id=run_id, handler=lambda t: {"recovered": True})
 

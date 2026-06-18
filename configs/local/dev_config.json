@@ -5,7 +5,9 @@
   },
   "executor": {
     "kind": "local",
-    "max_workers": 2
+    "concurrency": {
+      "mode": "sequential"
+    }
   },
   "artifacts": {
     "root": "./artifacts/dev"

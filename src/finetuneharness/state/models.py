@@ -23,6 +23,10 @@ class TaskStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     TIMED_OUT = "timed_out"
+    # Handler returned, but result validation found it structurally untrustworthy
+    # (degenerate experiment or out-of-range/NaN metrics). Terminal, NOT a success
+    # and NOT retried — see executor.worker and evaluation.validator.
+    DEGENERATE = "degenerate"
     CANCELLED = "cancelled"
 
 

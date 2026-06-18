@@ -5,7 +5,9 @@
   },
   "executor": {
     "kind": "local",
-    "max_workers": 8
+    "concurrency": {
+      "mode": "sequential"
+    }
   },
   "artifacts": {
     "root": "/mnt/artifacts/promoter-species-id"

@@ -72,33 +72,52 @@ def test_artifacts_root_empty_raises() -> None:
         validate_run_config(cfg)
 
 
-def test_executor_max_workers_valid_int_passes() -> None:
+def test_executor_max_workers_is_deprecated_not_fatal() -> None:
+    """Legacy max_workers no longer sizes anything: warn, never raise.
+
+    Old configs on disk must keep loading; the value is simply ignored in favor
+    of executor.concurrency.
+    """
     cfg = {**_VALID, "executor": {"kind": "local", "max_workers": 8}}
+    with pytest.warns(DeprecationWarning, match="max_workers"):
+        validate_run_config(cfg)
+
+    # Even nonsensical legacy values must not raise — the field is dead.
+    for bad in (0, -2, "8"):
+        cfg = {**_VALID, "executor": {"kind": "local", "max_workers": bad}}
+        with pytest.warns(DeprecationWarning):
+            validate_run_config(cfg)
+
+
+def test_executor_concurrency_valid_passes() -> None:
+    cfg = {**_VALID, "executor": {"kind": "local", "concurrency": {
+        "mode": "resource_aware", "min_free_mb": 2000, "max_concurrent": 4,
+        "settle_seconds": 5, "max_oom_retries": 3,
+    }}}
     validate_run_config(cfg)  # must not raise
 
 
-def test_executor_max_workers_zero_raises() -> None:
-    cfg = {**_VALID, "executor": {"kind": "local", "max_workers": 0}}
-    with pytest.raises(ValueError, match="max_workers"):
-        validate_run_config(cfg)
-
-
-def test_executor_max_workers_negative_raises() -> None:
-    cfg = {**_VALID, "executor": {"kind": "local", "max_workers": -2}}
-    with pytest.raises(ValueError, match="max_workers"):
-        validate_run_config(cfg)
-
-
-def test_executor_max_workers_string_raises() -> None:
-    cfg = {**_VALID, "executor": {"kind": "local", "max_workers": "8"}}
-    with pytest.raises(ValueError, match="max_workers"):
-        validate_run_config(cfg)
-
-
-def test_executor_max_workers_absent_passes() -> None:
-    """max_workers is optional — omitting it must not raise."""
+def test_executor_concurrency_absent_passes() -> None:
     cfg = {**_VALID, "executor": {"kind": "local"}}
     validate_run_config(cfg)
+
+
+def test_executor_concurrency_bad_mode_raises() -> None:
+    cfg = {**_VALID, "executor": {"kind": "local", "concurrency": {"mode": "turbo"}}}
+    with pytest.raises(ValueError, match="concurrency.mode"):
+        validate_run_config(cfg)
+
+
+def test_executor_concurrency_zero_max_concurrent_raises() -> None:
+    cfg = {**_VALID, "executor": {"kind": "local", "concurrency": {"max_concurrent": 0}}}
+    with pytest.raises(ValueError, match="max_concurrent"):
+        validate_run_config(cfg)
+
+
+def test_executor_concurrency_negative_min_free_raises() -> None:
+    cfg = {**_VALID, "executor": {"kind": "local", "concurrency": {"min_free_mb": -1}}}
+    with pytest.raises(ValueError, match="min_free_mb"):
+        validate_run_config(cfg)
 
 
 # ── Regression: actual config files must pass validation ─────────────────────

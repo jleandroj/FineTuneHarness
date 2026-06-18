@@ -12,7 +12,20 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from finetuneharness.state.models import ArtifactRecord, RunRecord, TaskRecord
+from finetuneharness.state.models import ArtifactRecord, EventRecord, RunRecord, TaskRecord
+
+
+def _drain_modes(events: list[EventRecord] | None) -> list[str]:
+    """Distinct execution modes recorded by 'drain_started' events, in first-seen order."""
+    if not events:
+        return []
+    seen: list[str] = []
+    for e in events:
+        if e.kind == "drain_started":
+            mode = e.payload.get("mode")
+            if isinstance(mode, str) and mode not in seen:
+                seen.append(mode)
+    return seen
 
 
 def canonical_json_hash(d: dict[str, Any]) -> str:
@@ -35,7 +48,9 @@ class ReproducibilityAssessment:
     warnings: list[str] = field(default_factory=list)
 
 
-def assess_reproducibility(run: RunRecord) -> ReproducibilityAssessment:
+def assess_reproducibility(
+    run: RunRecord, events: list[EventRecord] | None = None
+) -> ReproducibilityAssessment:
     """Assess how reproducible a run is based on what metadata was captured.
 
     PASS    → seed + dataset_hashes + config_hash + git_commit + container digest.
@@ -44,9 +59,23 @@ def assess_reproducibility(run: RunRecord) -> ReproducibilityAssessment:
               Can reconstruct environment from package versions, but not bit-for-bit.
     FAIL    → missing seed, dataset_hashes, config_hash, or git_commit.
               Not enough information to attempt reproduction.
+
+    When *events* are supplied, the actual execution mode is surfaced: a run drained
+    under ``resource_aware`` concurrency is reproducible because each task runs in an
+    isolated process (per-process RNG), but that fact is recorded as a warning so the
+    distinction from gold-standard sequential execution is explicit.
     """
     missing: list[str] = []
     warnings: list[str] = []
+
+    modes = _drain_modes(events)
+    if "resource_aware" in modes:
+        warnings.append(
+            "run executed under resource_aware concurrency; reproducibility relies on "
+            "per-process RNG isolation (each task runs in its own process). This is "
+            "sound, but sequential execution remains the gold standard for bit-for-bit "
+            "comparison."
+        )
 
     # ── Hard requirements (FAIL if absent) ───────────────────────────────────
     if run.seed is None:
@@ -131,14 +160,20 @@ def export_manifest(
     run: RunRecord,
     tasks: list[TaskRecord],
     artifacts: list[ArtifactRecord],
+    events: list[EventRecord] | None = None,
 ) -> dict[str, Any]:
     """Export a self-contained reproducibility manifest for a run.
 
     The manifest contains everything needed to attempt replay:
     seeds, data hashes, config hash, git state, env snapshot,
     container info, hardware info, task results, and output hashes.
+
+    When *events* are supplied, an ``execution`` section records the actual
+    drain mode(s) the run ran under, so the manifest does not silently imply
+    sequential execution.
     """
-    assessment = assess_reproducibility(run)
+    assessment = assess_reproducibility(run, events)
+    drain_modes = _drain_modes(events)
 
     env = run.env_snapshot
     git_info = {
@@ -187,6 +222,11 @@ def export_manifest(
         "env_snapshot": env,
         "container": env.get("container", {"engine": "none"}),
         "hardware": env.get("hardware", {}),
+        # ── Execution ─────────────────────────────────────────────────────────
+        "execution": {
+            # Empty when no events were supplied (mode unknown to the manifest).
+            "drain_modes": drain_modes,
+        },
         # ── Assessment ────────────────────────────────────────────────────────
         "reproducibility": {
             "level": assessment.level,

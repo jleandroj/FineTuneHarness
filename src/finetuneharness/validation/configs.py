@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 
 REQUIRED_TOP_LEVEL_KEYS = frozenset({"project", "executor", "artifacts"})
+
+_VALID_CONCURRENCY_MODES = ("sequential", "resource_aware")
 
 
 def validate_run_config(config: dict[str, Any]) -> None:
@@ -22,12 +25,18 @@ def validate_run_config(config: dict[str, Any]) -> None:
     executor = config.get("executor")
     if not isinstance(executor, dict):
         raise ValueError("run config 'executor' must be a dict")
+    # 'max_workers' is dead: it never sized any pool. Concurrency is governed at
+    # runtime by 'executor.concurrency'. Accept the legacy field but warn so old
+    # configs on disk keep loading instead of hard-failing.
     if "max_workers" in executor:
-        mw = executor["max_workers"]
-        if not isinstance(mw, int) or mw < 1:
-            raise ValueError(
-                f"run config 'executor.max_workers' must be a positive int, got {mw!r}"
-            )
+        warnings.warn(
+            "run config 'executor.max_workers' is deprecated and ignored. "
+            "Use 'executor.concurrency' (mode/min_free_mb/max_concurrent) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    if "concurrency" in executor:
+        _validate_concurrency(executor["concurrency"])
 
     artifacts = config.get("artifacts")
     if not isinstance(artifacts, dict):
@@ -38,6 +47,39 @@ def validate_run_config(config: dict[str, Any]) -> None:
     # ── Reproducibility fields (required) ────────────────────────────────────
     _validate_seed(config)
     _validate_dataset_hash(config)
+
+
+def _validate_concurrency(conc: Any) -> None:
+    if not isinstance(conc, dict):
+        raise ValueError("run config 'executor.concurrency' must be a dict")
+    mode = conc.get("mode", "sequential")
+    if mode not in _VALID_CONCURRENCY_MODES:
+        raise ValueError(
+            f"run config 'executor.concurrency.mode' must be one of "
+            f"{_VALID_CONCURRENCY_MODES}, got {mode!r}"
+        )
+    for key in ("min_free_mb", "settle_seconds"):
+        if key in conc:
+            val = conc[key]
+            if not isinstance(val, (int, float)) or isinstance(val, bool) or val < 0:
+                raise ValueError(
+                    f"run config 'executor.concurrency.{key}' must be a non-negative number, "
+                    f"got {val!r}"
+                )
+    if "max_concurrent" in conc:
+        val = conc["max_concurrent"]
+        if not isinstance(val, int) or isinstance(val, bool) or val < 1:
+            raise ValueError(
+                f"run config 'executor.concurrency.max_concurrent' must be a positive int, "
+                f"got {val!r}"
+            )
+    if "max_oom_retries" in conc:
+        val = conc["max_oom_retries"]
+        if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+            raise ValueError(
+                f"run config 'executor.concurrency.max_oom_retries' must be a non-negative int, "
+                f"got {val!r}"
+            )
 
 
 def _validate_seed(config: dict[str, Any]) -> None:

@@ -11,6 +11,7 @@ from finetuneharness.evaluation.comparator import (
     compare_runs,
 )
 from finetuneharness.evaluation.report import format_report, report_to_dict
+from finetuneharness.executor.resources import ConcurrencyConfig, NvmlMonitor
 from finetuneharness.executor.worker import DegradedRunError, LocalWorker
 from finetuneharness.orchestrator.approval import ApprovalError, InteractiveApprovalGate
 from finetuneharness.orchestrator.runner import FineTuneRunner
@@ -40,6 +41,36 @@ def _load_handler(spec: str):
     return fn
 
 
+def _is_approved(store, run_id: str) -> bool:
+    """True if the run has a recorded approval (a 'run_approved' event)."""
+    return any(ev.kind == "run_approved" for ev in store.list_events(run_id))
+
+
+def _resolve_concurrency(config: dict, args) -> ConcurrencyConfig:
+    """Build a ConcurrencyConfig from the stored run config, with CLI overrides.
+
+    Precedence: CLI flag > executor.concurrency in the run config > dataclass default.
+    """
+    conc = {}
+    executor = config.get("executor")
+    if isinstance(executor, dict) and isinstance(executor.get("concurrency"), dict):
+        conc = dict(executor["concurrency"])
+    if args.concurrency_mode is not None:
+        conc["mode"] = args.concurrency_mode
+    if args.min_free_mb is not None:
+        conc["min_free_mb"] = args.min_free_mb
+    if args.max_concurrent is not None:
+        conc["max_concurrent"] = args.max_concurrent
+    defaults = ConcurrencyConfig()
+    return ConcurrencyConfig(
+        mode=conc.get("mode", defaults.mode),
+        min_free_mb=conc.get("min_free_mb", defaults.min_free_mb),
+        max_concurrent=conc.get("max_concurrent", defaults.max_concurrent),
+        settle_seconds=conc.get("settle_seconds", defaults.settle_seconds),
+        max_oom_retries=conc.get("max_oom_retries", defaults.max_oom_retries),
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="FineTuneHarness CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -62,7 +93,26 @@ def main() -> None:
         "--handler", required=True, metavar="MODULE:FUNCTION",
         help="Import path of the task handler, e.g. 'mypkg.handlers:train'",
     )
-    run_cmd.add_argument("--max-workers", type=int, default=4)
+    run_cmd.add_argument(
+        "--concurrency-mode", choices=["sequential", "resource_aware"], default=None,
+        help="Override executor.concurrency.mode from the run config. "
+             "'resource_aware' admits multiple tasks while the GPU has free memory; "
+             "'sequential' runs one at a time.",
+    )
+    run_cmd.add_argument(
+        "--min-free-mb", type=float, default=None,
+        help="Resource-aware mode: do not admit another task while free GPU memory "
+             "is below this many MB (headroom).",
+    )
+    run_cmd.add_argument(
+        "--max-concurrent", type=int, default=None,
+        help="Resource-aware mode: hard ceiling on tasks in flight at once.",
+    )
+    run_cmd.add_argument(
+        "--skip-approval", action="store_true",
+        help="Bypass the approval gate. Without this, 'run' refuses a run that was "
+             "not approved via 'start-run'.",
+    )
 
     status_cmd = sub.add_parser("status", help="Show run status summary")
     status_cmd.add_argument("--run-id", required=True)
@@ -135,10 +185,31 @@ def main() -> None:
 
     if args.command == "run":
         store = SQLiteStateStore(Path(args.state_db))
+        run = store.get_run(args.run_id)
+        if run is None:
+            print(f"Error: unknown run_id {args.run_id!r}", flush=True)
+            raise SystemExit(1)
+
+        if not args.skip_approval and not _is_approved(store, args.run_id):
+            print(
+                f"Error: run {args.run_id} has not been approved. "
+                f"Run 'finetuneharness start-run --run-id {args.run_id}' first, "
+                f"or pass --skip-approval to bypass.",
+                flush=True,
+            )
+            raise SystemExit(1)
+
         handler = _load_handler(args.handler)
-        worker = LocalWorker(worker_id="cli", store=store, max_workers=args.max_workers)
+        concurrency = _resolve_concurrency(run.config, args)
+        worker = LocalWorker(worker_id="cli", store=store)
         try:
-            succeeded = worker.drain(run_id=args.run_id, handler=handler)
+            if concurrency.is_resource_aware:
+                succeeded = worker.drain_concurrent(
+                    run_id=args.run_id, handler=handler,
+                    concurrency=concurrency, monitor=NvmlMonitor(),
+                )
+            else:
+                succeeded = worker.drain(run_id=args.run_id, handler=handler)
             print(f"Run {args.run_id}: {succeeded} task(s) succeeded")
         except DegradedRunError as exc:
             print(str(exc), flush=True)
@@ -227,7 +298,7 @@ def main() -> None:
         if run is None:
             print(f"Error: unknown run_id {args.run_id!r}", flush=True)
             raise SystemExit(1)
-        assessment = assess_reproducibility(run)
+        assessment = assess_reproducibility(run, store.list_events(args.run_id))
         if args.fmt == "json":
             print(json.dumps({
                 "run_id": run.run_id,
@@ -259,7 +330,7 @@ def main() -> None:
             raise SystemExit(1)
         tasks = store.list_tasks(args.run_id)
         artifacts = store.list_artifacts(args.run_id)
-        manifest = export_manifest(run, tasks, artifacts)
+        manifest = export_manifest(run, tasks, artifacts, store.list_events(args.run_id))
         print(json.dumps(manifest, indent=2))
         return
 

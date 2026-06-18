@@ -17,10 +17,11 @@ ALLOWED_TASK_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.PENDING: {TaskStatus.LEASED, TaskStatus.CANCELLED},
     TaskStatus.LEASED: {TaskStatus.RUNNING, TaskStatus.CANCELLED, TaskStatus.TIMED_OUT},
     # PENDING is allowed from RUNNING to support the retry path (worker re-queues on failure)
-    TaskStatus.RUNNING: {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.TIMED_OUT, TaskStatus.CANCELLED, TaskStatus.PENDING},
+    TaskStatus.RUNNING: {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.TIMED_OUT, TaskStatus.DEGENERATE, TaskStatus.CANCELLED, TaskStatus.PENDING},
     TaskStatus.SUCCEEDED: set(),
     TaskStatus.FAILED: set(),
     TaskStatus.TIMED_OUT: set(),
+    TaskStatus.DEGENERATE: set(),
     TaskStatus.CANCELLED: set(),
 }
 
