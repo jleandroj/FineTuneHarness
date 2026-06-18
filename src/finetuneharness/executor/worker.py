@@ -187,6 +187,11 @@ class LocalWorker:
         if outcome.status in (ResultStatus.DEGENERATE_RESULT, ResultStatus.FAILED_VALIDATION):
             result["_validation_errors"] = outcome.validation_errors
 
+        # Fire after_task_success hooks BEFORE persisting so hook mutations
+        # (e.g. gpu_allocated_mb from GPUMemoryHook) are included in the stored
+        # result. HookRegistry.fire() is fire-and-forget: a crashing hook is
+        # logged and skipped, so the store write always completes.
+        self._hooks.fire("after_task_success", task=task, result=result)
         self._store.update_task_status(task.task_id, TaskStatus.SUCCEEDED, result=result)
         if self._artifact_store is not None:
             self._artifact_store.write_json_artifact(
@@ -207,7 +212,6 @@ class LocalWorker:
         )
         run_status = self._runner.refresh_run_status(run_id)
         self._log.info("task_succeeded", extra={"run_id": run_id, "task_id": task.task_id})
-        self._hooks.fire("after_task_success", task=task, result=result)
         self._hooks.fire("on_run_status_changed", run_id=run_id, status=run_status)
         return task
 

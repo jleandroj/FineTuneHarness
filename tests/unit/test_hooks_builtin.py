@@ -18,6 +18,17 @@ from finetuneharness.registry.hooks import (
 )
 from finetuneharness.orchestrator.hooks import HookRegistry
 from finetuneharness.state.models import RunStatus, TaskRecord, TaskStatus
+from finetuneharness.state.sqlite import SQLiteStateStore
+from finetuneharness.orchestrator.runner import FineTuneRunner
+from finetuneharness.executor.worker import LocalWorker
+
+_BASE_CONFIG = {
+    "project": {"name": "hook-test"},
+    "executor": {"kind": "local"},
+    "artifacts": {"root": "./artifacts"},
+    "seed": 42,
+    "dataset_hash": "sha256:test",
+}
 
 
 class TestGPUMemoryHook:
@@ -227,3 +238,112 @@ class TestRegisterDefaultHooks:
             progress=False,
         )
         assert hooks == {}
+
+
+# ── Regression: hook mutations persisted to store (Bug: GPUMemoryHook) ────────
+
+class TestHookMutationPersistence:
+    """after_task_success hook mutations to the result dict must be persisted.
+
+    Before the fix, hooks fired AFTER update_task_status, so SQLiteStateStore
+    had already JSON-serialized the result and mutations were silently lost.
+    InMemoryStateStore stored by reference so the bug was invisible in tests.
+    """
+
+    def test_hook_enrichment_persisted_to_sqlite(self, tmp_path):
+        """Hook-added fields must appear in the result stored in SQLite."""
+        store = SQLiteStateStore(tmp_path / "state.db")
+        runner = FineTuneRunner(store)
+        registry = HookRegistry()
+
+        def gpu_sim_hook(task: TaskRecord, result: dict) -> None:
+            result["gpu_peak_mb"] = 2048.0  # simulates GPUMemoryHook
+
+        registry.register("after_task_success", gpu_sim_hook)
+
+        run_id = runner.create_run(name="r", config=_BASE_CONFIG, tasks=[{"task_key": "a"}])
+        worker = LocalWorker(worker_id="w", store=store, runner=runner, hooks=registry)
+        worker.run_once(run_id=run_id, handler=lambda t: {"accuracy": 0.9})
+
+        # Reload from SQLite — the hook-added field must survive the round-trip
+        task = store.list_tasks(run_id)[0]
+        assert task.result is not None, "result should be stored"
+        assert task.result.get("gpu_peak_mb") == 2048.0, (
+            "hook-added field was not persisted — after_task_success fired after store write"
+        )
+
+    def test_hook_enrichment_persisted_to_memory_store(self):
+        """Baseline: in-memory store should also see hook mutations."""
+        from finetuneharness.state.memory_store import InMemoryStateStore
+
+        store = InMemoryStateStore()
+        runner = FineTuneRunner(store)
+        registry = HookRegistry()
+
+        def hook(task: TaskRecord, result: dict) -> None:
+            result["hook_flag"] = True
+
+        registry.register("after_task_success", hook)
+
+        run_id = runner.create_run(name="r", config=_BASE_CONFIG, tasks=[{"task_key": "a"}])
+        worker = LocalWorker(worker_id="w", store=store, runner=runner, hooks=registry)
+        worker.run_once(run_id=run_id, handler=lambda t: {})
+
+        task = store.list_tasks(run_id)[0]
+        assert task.result is not None
+        assert task.result.get("hook_flag") is True
+
+    def test_crashing_hook_does_not_lose_result(self, tmp_path):
+        """A hook that raises must not prevent the result from being persisted."""
+        store = SQLiteStateStore(tmp_path / "state.db")
+        runner = FineTuneRunner(store)
+        registry = HookRegistry()
+
+        def broken_hook(task: TaskRecord, result: dict) -> None:
+            raise RuntimeError("hook exploded")
+
+        registry.register("after_task_success", broken_hook)
+
+        run_id = runner.create_run(name="r", config=_BASE_CONFIG, tasks=[{"task_key": "a"}])
+        worker = LocalWorker(worker_id="w", store=store, runner=runner, hooks=registry)
+        worker.run_once(run_id=run_id, handler=lambda t: {"accuracy": 0.9})
+
+        task = store.list_tasks(run_id)[0]
+        assert task.result is not None
+        assert task.result.get("accuracy") == 0.9
+
+
+# ── Regression: CleanupHook no longer allocates dummy model ──────────────────
+
+class TestCleanupHookNoDummyModel:
+    """CleanupHook must not allocate any torch model during cleanup.
+
+    Before the fix, _cleanup created nn.Linear(1,1) to 'clear gradients' —
+    but the dummy model had no gradients (never backpropped), so it was a no-op
+    that additionally allocated tensors on every cleanup call.
+    """
+
+    def test_cleanup_hook_has_no_clear_torch_grad_parameter(self):
+        import inspect
+        sig = inspect.signature(CleanupHook.__init__)
+        assert "clear_torch_grad" not in sig.parameters, (
+            "clear_torch_grad was removed — it silently did nothing (dummy model, no backprop)"
+        )
+
+    def test_cleanup_does_not_allocate_nn_linear(self):
+        """_cleanup must not instantiate any torch.nn.Module."""
+        try:
+            import torch.nn as nn
+            from unittest.mock import patch
+
+            hook = CleanupHook()
+            task = TaskRecord(task_id="1", run_id="r", task_key="t", status=TaskStatus.PENDING, payload={})
+
+            with patch.object(nn, "Linear", side_effect=AssertionError("should not create nn.Linear")) as mock_linear:
+                hook.after_task_success(task, {})
+                hook.after_task_failure(task, RuntimeError("err"))
+                hook.after_task_timeout(task)
+                # If nn.Linear was called, the patch would have raised
+                assert mock_linear.call_count == 0
+        except ImportError:
+            pytest.skip("torch not installed")

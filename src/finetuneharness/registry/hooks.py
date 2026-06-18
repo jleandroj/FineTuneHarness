@@ -206,11 +206,15 @@ class EarlyStoppingHook:
 
 @dataclass
 class CleanupHook:
-    """Clean up resources between tasks to prevent memory leaks."""
+    """Release Python and GPU memory between tasks.
+
+    Calls gc.collect() and torch.cuda.empty_cache() (when CUDA is available).
+    Gradient zeroing is intentionally NOT performed here: the harness does not
+    own model state. Call model.zero_grad() inside your handler instead.
+    """
 
     clear_cuda_cache: bool = True
     gc_collect: bool = True
-    clear_torch_grad: bool = True
 
     def after_task_success(self, task: TaskRecord, result: dict) -> None:
         self._cleanup()
@@ -224,14 +228,9 @@ class CleanupHook:
     def _cleanup(self) -> None:
         if self.gc_collect:
             gc.collect()
-        if TORCH_AVAILABLE:
+        if TORCH_AVAILABLE and self.clear_cuda_cache:
             import torch
-            import torch.nn as nn
-
-            if self.clear_torch_grad:
-                dummy = nn.Linear(1, 1)
-                torch.nn.utils.clip_grad_norm_(dummy.parameters(), 1.0)
-            if self.clear_cuda_cache and torch.cuda.is_available():
+            if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
 
