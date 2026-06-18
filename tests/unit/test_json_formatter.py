@@ -203,3 +203,62 @@ class TestJsonFormatterExtraFields:
         payload = json.loads(formatter.format(record))
         for key in payload:
             assert not key.startswith("_"), f"Private field {key!r} leaked into JSON"
+
+
+class TestJsonFormatterSensitiveRedaction:
+    """Sensitive keys must be redacted — never logged in plaintext."""
+
+    def test_password_redacted(self):
+        formatter = JsonFormatter()
+        record = _make_record(extra={"password": "hunter2"})
+        payload = json.loads(formatter.format(record))
+        assert payload["password"] == "[REDACTED]"
+        assert "hunter2" not in json.dumps(payload)
+
+    def test_api_key_redacted(self):
+        formatter = JsonFormatter()
+        record = _make_record(extra={"api_key": "sk-abc123"})
+        payload = json.loads(formatter.format(record))
+        assert payload["api_key"] == "[REDACTED]"
+
+    def test_token_variants_redacted(self):
+        """token, hf_token, auth_token, bearer_token — all must be redacted."""
+        formatter = JsonFormatter()
+        for key in ("token", "hf_token", "auth_token", "bearer_token", "HF_TOKEN"):
+            record = _make_record(extra={key: "secret-value"})
+            payload = json.loads(formatter.format(record))
+            assert payload[key] == "[REDACTED]", f"key {key!r} not redacted"
+
+    def test_secret_redacted(self):
+        formatter = JsonFormatter()
+        record = _make_record(extra={"db_secret": "password123", "secret_key": "xyz"})
+        payload = json.loads(formatter.format(record))
+        assert payload["db_secret"] == "[REDACTED]"
+        assert payload["secret_key"] == "[REDACTED]"
+
+    def test_non_sensitive_fields_pass_through(self):
+        """Ordinary fields must not be redacted."""
+        formatter = JsonFormatter()
+        record = _make_record(extra={
+            "run_id": "abc", "task_count": 5, "accuracy": 0.9, "author": "alice",
+        })
+        payload = json.loads(formatter.format(record))
+        assert payload["run_id"] == "abc"
+        assert payload["task_count"] == 5
+        assert payload["accuracy"] == 0.9
+        assert payload["author"] == "alice"
+
+    def test_redacted_value_is_literal_string(self):
+        """Redaction marker must be the literal string [REDACTED], not None or empty."""
+        formatter = JsonFormatter()
+        record = _make_record(extra={"password": "x"})
+        payload = json.loads(formatter.format(record))
+        assert payload["password"] == "[REDACTED]"
+
+    def test_sensitive_key_present_in_output_as_redacted_not_absent(self):
+        """Key must be present with [REDACTED] value — absence would hide that a sensitive
+        field was passed, making auditing harder."""
+        formatter = JsonFormatter()
+        record = _make_record(extra={"api_key": "real-key"})
+        payload = json.loads(formatter.format(record))
+        assert "api_key" in payload, "sensitive key must appear in output (as [REDACTED])"

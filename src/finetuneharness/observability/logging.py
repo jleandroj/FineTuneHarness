@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from datetime import datetime, timezone
 from typing import Any
@@ -15,6 +16,32 @@ _BUILTIN_ATTRS: frozenset[str] = frozenset({
     "msg", "name", "pathname", "process", "processName", "relativeCreated",
     "stack_info", "thread", "threadName", "taskName",
 })
+
+# Keys whose values must never appear in logs in plaintext.
+#
+# Two-tier matching (all case-insensitive):
+#   _SENSITIVE_WORDS  — each word segment (split on _ - .) is checked against
+#                       these; catches "token", "hf_token", "db_password", "auth"
+#                       without false-positives like "author" (segment "author" ≠ "auth").
+#   _SENSITIVE_FULL_KEYS — exact full-key matches for compound names that cannot
+#                          be caught by single-word segments (e.g. "api_key").
+_SENSITIVE_WORDS: frozenset[str] = frozenset({
+    "token", "secret", "password", "credential", "auth",
+})
+_SENSITIVE_FULL_KEYS: frozenset[str] = frozenset({
+    "api_key", "apikey", "private_key", "access_key",
+    "auth_key", "auth_token", "bearer_token", "oauth_token",
+})
+
+_REDACTED = "[REDACTED]"
+_SPLIT_RE = re.compile(r"[_\-\.]")
+
+
+def _is_sensitive(key: str) -> bool:
+    k = key.lower()
+    if k in _SENSITIVE_FULL_KEYS:
+        return True
+    return bool(set(_SPLIT_RE.split(k)) & _SENSITIVE_WORDS)
 
 
 def _json_default(obj: Any) -> Any:
@@ -43,11 +70,11 @@ class JsonFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
         # Include every field injected via extra={} — skip built-ins and privates.
-        # This replaces the old 3-key whitelist: any caller-supplied context survives.
+        # Sensitive keys (password, token, api_key, …) are redacted in place.
         for key, value in record.__dict__.items():
             if key in _BUILTIN_ATTRS or key.startswith("_"):
                 continue
-            payload[key] = value
+            payload[key] = _REDACTED if _is_sensitive(key) else value
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
         if record.stack_info:
