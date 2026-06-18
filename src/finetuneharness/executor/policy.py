@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import pickle
 import shutil
@@ -63,22 +64,32 @@ class NoSandbox:
 class FirejailSandbox:
     """Runs each handler in an isolated firejail subprocess.
 
-    The handler and task are serialized with pickle, piped to a child Python
-    process launched under firejail, and the result is deserialized on return.
-    Handlers must be picklable (module-level functions — not lambdas).
+    Input (parent→child): handler + task are serialized with pickle — unavoidable
+    because handlers are callables. Handlers must be module-level functions
+    (not lambdas or closures) to be picklable.
+
+    Output (child→parent): result is serialized as JSON, not pickle.
+    This eliminates pickle.loads on subprocess output, which can execute
+    arbitrary code if the child writes a crafted payload or raises a custom
+    exception whose class is not importable in the parent.
+
+    Tradeoff: the original exception type does not cross the process boundary.
+    Handler exceptions are re-raised as RuntimeError with the class name and
+    message embedded in the string.
 
     Network is disabled (--net=none) and /tmp is private by default.
     Pass extra_args to add further firejail restrictions (e.g. --read-only=/).
     """
 
     _RUNNER = "\n".join([
-        "import pickle, sys",
+        "import json, pickle, sys",
         "fn, t = pickle.loads(sys.stdin.buffer.read())",
         "try:",
-        "    out = (True, fn(t))",
+        "    result = fn(t)",
+        "    sys.stdout.buffer.write(json.dumps({'ok': True, 'result': result}).encode())",
         "except Exception as exc:",
-        "    out = (False, exc)",
-        "sys.stdout.buffer.write(pickle.dumps(out))",
+        "    msg = type(exc).__name__ + ': ' + str(exc)",
+        "    sys.stdout.buffer.write(json.dumps({'ok': False, 'error': msg}).encode())",
     ])
 
     def __init__(self, *, extra_args: tuple[str, ...] = ()) -> None:
@@ -94,14 +105,13 @@ class FirejailSandbox:
             "python3", "-c", self._RUNNER,
         ]
         proc = subprocess.run(cmd, input=payload, capture_output=True, check=False)
-        # stdout comes from our own child process — safe to unpickle
         try:
-            ok, value = pickle.loads(proc.stdout)  # noqa: S301
+            data = json.loads(proc.stdout)
         except Exception:
             stderr = proc.stderr.decode(errors="replace")
             raise RuntimeError(
                 f"firejail subprocess failed (exit {proc.returncode}): {stderr}"
             ) from None
-        if not ok:
-            raise value
-        return value
+        if not data["ok"]:
+            raise RuntimeError(f"handler raised in sandbox: {data['error']}")
+        return data["result"]
