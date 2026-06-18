@@ -4,7 +4,12 @@ import argparse
 import json
 from pathlib import Path
 
-from finetuneharness.evaluation.comparator import compare_runs
+from finetuneharness.evaluation.comparator import (
+    filter_runs_since,
+    find_latest_run_pair,
+    parse_since_duration,
+    compare_runs,
+)
 from finetuneharness.evaluation.report import format_report, report_to_dict
 from finetuneharness.orchestrator.approval import ApprovalError, InteractiveApprovalGate
 from finetuneharness.orchestrator.runner import FineTuneRunner
@@ -42,12 +47,33 @@ def main() -> None:
     list_runs_cmd = sub.add_parser("list-runs", help="List all runs in the state DB")
     list_runs_cmd.add_argument("--state-db", default=".finetuneharness/state.db")
     list_runs_cmd.add_argument("--format", dest="fmt", choices=["text", "json"], default="text")
+    list_runs_cmd.add_argument(
+        "--since",
+        default=None,
+        metavar="DURATION",
+        help="Filter runs created within this window, e.g. '7d', '30d', '2h', '1w'",
+    )
 
     compare_cmd = sub.add_parser("compare-runs", help="Compare two or more runs (first is baseline)")
-    compare_cmd.add_argument("--run-id", dest="run_ids", action="append", required=True, metavar="RUN_ID",
-                             help="Run IDs to compare; first is baseline. Repeat for each run.")
+    compare_run_group = compare_cmd.add_mutually_exclusive_group()
+    compare_run_group.add_argument(
+        "--run-id", dest="run_ids", action="append", metavar="RUN_ID",
+        help="Run IDs to compare; first is baseline. Repeat for each run.",
+    )
+    compare_run_group.add_argument(
+        "--latest-previous", action="store_true", default=False,
+        help="Auto-select the two most recent runs (previous=baseline, latest=compare)",
+    )
     compare_cmd.add_argument("--format", dest="fmt", choices=["text", "json"], default="text")
     compare_cmd.add_argument("--state-db", default=".finetuneharness/state.db")
+    compare_cmd.add_argument(
+        "--strict", action="store_true", default=False,
+        help="Raise an error if runs have incompatible dataset_hash or other error-severity issues",
+    )
+    compare_cmd.add_argument(
+        "--thresholds", default=None, metavar="JSON",
+        help="JSON dict of per-metric regression thresholds, e.g. '{\"f1\": 0.03}'",
+    )
 
     args = parser.parse_args()
 
@@ -103,14 +129,27 @@ def main() -> None:
     if args.command == "list-runs":
         store = SQLiteStateStore(Path(args.state_db))
         runs = store.list_runs()
+        if args.since:
+            cutoff = parse_since_duration(args.since)
+            runs = filter_runs_since(runs, cutoff)
+        # Sort by created_at descending (most recent first)
+        runs = sorted(runs, key=lambda r: r.created_at, reverse=True)
         if args.fmt == "json":
             print(json.dumps([
-                {"run_id": r.run_id, "name": r.name, "status": r.status.value}
+                {
+                    "run_id": r.run_id,
+                    "name": r.name,
+                    "status": r.status.value,
+                    "created_at": r.created_at.isoformat(),
+                    "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+                }
                 for r in runs
             ], indent=2))
         else:
             for r in runs:
-                print(f"{r.run_id}  {r.status.value:<16}  {r.name}")
+                created = r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else "?"
+                finished = r.finished_at.strftime("%Y-%m-%d %H:%M") if r.finished_at else "-"
+                print(f"{r.run_id}  {r.status.value:<16}  {created}  →  {finished}  {r.name}")
         return
 
     if args.command == "start-run":
@@ -126,10 +165,29 @@ def main() -> None:
         return
 
     if args.command == "compare-runs":
-        if len(args.run_ids) < 2:
-            parser.error("compare-runs requires at least two --run-id values")
         store = SQLiteStateStore(Path(args.state_db))
-        report = compare_runs(args.run_ids, store)
+
+        if args.latest_previous:
+            try:
+                prev_id, latest_id = find_latest_run_pair(store)
+            except ValueError as exc:
+                parser.error(str(exc))
+                return
+            run_ids = [prev_id, latest_id]
+        else:
+            if not args.run_ids or len(args.run_ids) < 2:
+                parser.error("compare-runs requires at least two --run-id values or --latest-previous")
+            run_ids = args.run_ids
+
+        thresholds = None
+        if args.thresholds:
+            try:
+                thresholds = json.loads(args.thresholds)
+            except json.JSONDecodeError as exc:
+                parser.error(f"--thresholds is not valid JSON: {exc}")
+                return
+
+        report = compare_runs(run_ids, store, thresholds=thresholds, strict=args.strict)
         if args.fmt == "json":
             print(json.dumps(report_to_dict(report), indent=2))
         else:

@@ -18,6 +18,24 @@ def format_report(report: ComparisonReport) -> str:
         lines.append(f"Compare  : {snap.name} ({run_id[:8]})")
     lines.append("")
 
+    # ── Comparability warnings ────────────────────────────────────────────────
+    if report.comparability_issues:
+        errors = [i for i in report.comparability_issues if i.severity == "error"]
+        warnings = [i for i in report.comparability_issues if i.severity == "warning"]
+        if errors:
+            lines.append(f"COMPARABILITY ERRORS ({len(errors)}) — metrics may be meaningless")
+            lines.append("-" * 62)
+            for issue in errors:
+                lines.append(f"  [ERROR] {issue.message}")
+            lines.append("")
+        if warnings:
+            lines.append(f"Comparability Warnings ({len(warnings)})")
+            lines.append("-" * 62)
+            for issue in warnings:
+                lines.append(f"  [WARN]  {issue.message}")
+            lines.append("")
+
+    # ── Run summaries ─────────────────────────────────────────────────────────
     lines.append("Run Summaries")
     lines.append("-" * 62)
     for run_id in report.run_ids:
@@ -25,14 +43,16 @@ def format_report(report: ComparisonReport) -> str:
         rate = f"{snap.success_rate:.1%}" if not math.isnan(snap.success_rate) else "n/a"
         timing = f"  {snap.total_wall_seconds:.1f}s" if snap.total_wall_seconds is not None else ""
         tag = "  [baseline]" if run_id == baseline_id else ""
+        created = f"  created {snap.created_at.strftime('%Y-%m-%d %H:%M')}" if snap.created_at else ""
         lines.append(
             f"  {snap.name[:28]:<28}  {snap.status:<15}  "
-            f"{snap.succeeded}/{snap.total_tasks} tasks  {rate}{timing}{tag}"
+            f"{snap.succeeded}/{snap.total_tasks} tasks  {rate}{timing}{tag}{created}"
         )
     lines.append("")
 
+    # ── Status regressions ────────────────────────────────────────────────────
     if report.regressions:
-        lines.append(f"Regressions ({len(report.regressions)})")
+        lines.append(f"Status Regressions ({len(report.regressions)})")
         lines.append("-" * 62)
         for key in report.regressions:
             tc = next(c for c in report.task_comparisons if c.task_key == key)
@@ -42,6 +62,24 @@ def format_report(report: ComparisonReport) -> str:
             lines.append(f"  {key}: {statuses}")
         lines.append("")
 
+    # ── Metric regressions ────────────────────────────────────────────────────
+    metric_reg_tasks = [
+        tc for tc in report.task_comparisons if tc.metric_regressions
+    ]
+    if metric_reg_tasks:
+        lines.append(f"Metric Regressions ({len(metric_reg_tasks)} tasks)")
+        lines.append("-" * 62)
+        for tc in metric_reg_tasks:
+            lines.append(f"  {tc.task_key}:")
+            for metric_key, deltas in sorted(tc.metric_regressions.items()):
+                for run_id, delta in sorted(deltas.items()):
+                    sign = "+" if delta >= 0 else ""
+                    lines.append(
+                        f"    {metric_key}: {sign}{delta:.4f}  ({run_id[:8]})  [REGRESSION]"
+                    )
+        lines.append("")
+
+    # ── Improvements ─────────────────────────────────────────────────────────
     if report.improvements:
         lines.append(f"Improvements ({len(report.improvements)})")
         lines.append("-" * 62)
@@ -53,6 +91,7 @@ def format_report(report: ComparisonReport) -> str:
             lines.append(f"  {key}: {statuses}")
         lines.append("")
 
+    # ── All metric deltas ─────────────────────────────────────────────────────
     has_metrics = any(tc.metric_deltas for tc in report.task_comparisons)
     if has_metrics:
         lines.append("Metric Deltas (vs baseline)")
@@ -64,11 +103,28 @@ def format_report(report: ComparisonReport) -> str:
             for metric_key, deltas in sorted(tc.metric_deltas.items()):
                 for run_id, delta in sorted(deltas.items()):
                     sign = "+" if delta >= 0 else ""
+                    flag = "  [REGRESSION]" if (
+                        run_id in tc.metric_regressions.get(metric_key, {})
+                    ) else ""
                     lines.append(
-                        f"    {metric_key}: {sign}{delta:.4f}  ({run_id[:8]})"
+                        f"    {metric_key}: {sign}{delta:.4f}  ({run_id[:8]}){flag}"
                     )
         lines.append("")
 
+    # ── Excluded tasks ────────────────────────────────────────────────────────
+    if report.excluded_tasks:
+        total_excluded = sum(len(v) for v in report.excluded_tasks.values())
+        lines.append(f"Excluded from Metric Comparison ({total_excluded} task-run pairs)")
+        lines.append("-" * 62)
+        for run_id, keys in sorted(report.excluded_tasks.items()):
+            lines.append(f"  run {run_id[:8]}:")
+            for task_key in keys:
+                tc = next((c for c in report.task_comparisons if c.task_key == task_key), None)
+                reason = tc.excluded_from_metrics.get(run_id, "unknown") if tc else "unknown"
+                lines.append(f"    {task_key}: {reason}")
+        lines.append("")
+
+    # ── Timing ───────────────────────────────────────────────────────────────
     has_timing = any(
         any(v is not None for v in tc.wall_seconds_by_run.values())
         for tc in report.task_comparisons
@@ -86,7 +142,7 @@ def format_report(report: ComparisonReport) -> str:
             lines.append(f"  {tc.task_key}: {vals}")
         lines.append("")
 
-    if not report.regressions and not report.improvements:
+    if not report.regressions and not report.improvements and not metric_reg_tasks:
         lines.append("No regressions or improvements detected.")
 
     return "\n".join(lines)
@@ -105,17 +161,33 @@ def report_to_dict(report: ComparisonReport) -> dict[str, Any]:
                 "succeeded": s.succeeded,
                 "failed": s.failed,
                 "success_rate": None if math.isnan(s.success_rate) else s.success_rate,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+                "finished_at": s.finished_at.isoformat() if s.finished_at else None,
             }
             for run_id, s in report.snapshots.items()
         },
         "regressions": report.regressions,
         "improvements": report.improvements,
+        "metric_regressions": report.metric_regressions,
+        "comparability_issues": [
+            {
+                "severity": i.severity,
+                "field": i.field,
+                "baseline_value": i.baseline_value,
+                "compare_value": i.compare_value,
+                "message": i.message,
+            }
+            for i in report.comparability_issues
+        ],
+        "excluded_tasks": report.excluded_tasks,
         "task_comparisons": [
             {
                 "task_key": tc.task_key,
                 "status_by_run": tc.status_by_run,
                 "result_by_run": tc.result_by_run,
                 "metric_deltas": tc.metric_deltas,
+                "metric_regressions": tc.metric_regressions,
+                "excluded_from_metrics": tc.excluded_from_metrics,
                 "is_regression": tc.is_regression,
                 "is_improvement": tc.is_improvement,
             }

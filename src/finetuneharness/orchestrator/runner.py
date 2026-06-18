@@ -5,6 +5,8 @@ from collections import Counter
 from dataclasses import asdict
 from typing import Any
 
+from datetime import datetime, timezone
+
 from finetuneharness.observability.logging import get_logger
 from finetuneharness.orchestrator.approval import ApprovalGate
 from finetuneharness.orchestrator.lifecycle import ensure_run_transition
@@ -12,6 +14,8 @@ from finetuneharness.state.env_snapshot import capture_env_snapshot
 from finetuneharness.state.models import EventRecord, RunRecord, RunStatus, TaskRecord, TaskStatus
 from finetuneharness.state.store import StateStore
 from finetuneharness.validation.configs import validate_run_config
+
+_TERMINAL_STATUSES = frozenset({RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED})
 
 
 class FineTuneRunner:
@@ -79,8 +83,25 @@ class FineTuneRunner:
                 target = RunStatus.VALIDATED
 
         if target != run.status:
+            # If the direct transition is invalid, step through RUNNING first.
+            # This happens when tasks are completed without ever reaching the RUNNING
+            # run-level state (e.g. in tests or if the worker was bypassed).
+            from finetuneharness.orchestrator.lifecycle import ALLOWED_RUN_TRANSITIONS
+            if target not in ALLOWED_RUN_TRANSITIONS.get(run.status, set()):
+                if RunStatus.RUNNING in ALLOWED_RUN_TRANSITIONS.get(run.status, set()) and \
+                        target in ALLOWED_RUN_TRANSITIONS.get(RunStatus.RUNNING, set()):
+                    ensure_run_transition(run.status, RunStatus.RUNNING)
+                    self._store.update_run_status(run_id, RunStatus.RUNNING)
+                    self._store.append_event(EventRecord(
+                        event_id=uuid.uuid4().hex, run_id=run_id, task_id=None,
+                        kind="run_status_changed",
+                        payload={"from": run.status.value, "to": RunStatus.RUNNING.value},
+                    ))
+                    run = self._store.get_run(run_id)
             ensure_run_transition(run.status, target)
             self._store.update_run_status(run_id, target)
+            if target in _TERMINAL_STATUSES and run.finished_at is None:
+                self._store.update_run_finished_at(run_id, datetime.now(timezone.utc))
             self._store.append_event(
                 EventRecord(
                     event_id=uuid.uuid4().hex,

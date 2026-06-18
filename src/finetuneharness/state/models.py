@@ -34,6 +34,7 @@ class RunRecord:
     config: dict[str, Any]
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     env_snapshot: dict[str, Any] = field(default_factory=dict)
+    finished_at: datetime | None = None
 
 
 @dataclass(frozen=True)

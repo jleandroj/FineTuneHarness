@@ -39,7 +39,8 @@ class SQLiteStateStore(StateStore):
                     status TEXT NOT NULL,
                     config_json TEXT NOT NULL,
                     created_at TEXT,
-                    env_snapshot_json TEXT
+                    env_snapshot_json TEXT,
+                    finished_at TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS tasks (
@@ -93,11 +94,14 @@ class SQLiteStateStore(StateStore):
                 conn.execute("ALTER TABLE runs ADD COLUMN created_at TEXT")
             if 'env_snapshot_json' not in run_cols:
                 conn.execute("ALTER TABLE runs ADD COLUMN env_snapshot_json TEXT")
+            if 'finished_at' not in run_cols:
+                conn.execute("ALTER TABLE runs ADD COLUMN finished_at TEXT")
 
     def create_run(self, run: RunRecord) -> None:
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO runs (run_id, name, status, config_json, created_at, env_snapshot_json) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO runs (run_id, name, status, config_json, created_at, env_snapshot_json, finished_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     run.run_id,
                     run.name,
@@ -105,8 +109,18 @@ class SQLiteStateStore(StateStore):
                     json.dumps(run.config, sort_keys=True),
                     run.created_at.isoformat(),
                     json.dumps(run.env_snapshot, sort_keys=True) if run.env_snapshot else None,
+                    run.finished_at.isoformat() if run.finished_at is not None else None,
                 ),
             )
+
+    def update_run_finished_at(self, run_id: str, finished_at: datetime) -> None:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE runs SET finished_at = ? WHERE run_id = ?",
+                (finished_at.isoformat(), run_id),
+            )
+            if cur.rowcount != 1:
+                raise KeyError(f"unknown run_id: {run_id}")
 
     def update_run_status(self, run_id: str, status: RunStatus) -> None:
         with self._connect() as conn:
@@ -117,7 +131,8 @@ class SQLiteStateStore(StateStore):
     def get_run(self, run_id: str) -> RunRecord | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT run_id, name, status, config_json, created_at, env_snapshot_json FROM runs WHERE run_id = ?",
+                "SELECT run_id, name, status, config_json, created_at, env_snapshot_json, finished_at"
+                " FROM runs WHERE run_id = ?",
                 (run_id,),
             ).fetchone()
         if row is None:
@@ -129,12 +144,14 @@ class SQLiteStateStore(StateStore):
             config=json.loads(row["config_json"]),
             created_at=datetime.fromisoformat(row["created_at"]) if row["created_at"] else datetime.now(timezone.utc),
             env_snapshot=json.loads(row["env_snapshot_json"]) if row["env_snapshot_json"] else {},
+            finished_at=datetime.fromisoformat(row["finished_at"]) if row["finished_at"] else None,
         )
 
     def list_runs(self) -> list[RunRecord]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT run_id, name, status, config_json, created_at, env_snapshot_json FROM runs ORDER BY rowid"
+                "SELECT run_id, name, status, config_json, created_at, env_snapshot_json, finished_at"
+                " FROM runs ORDER BY rowid"
             ).fetchall()
         return [
             RunRecord(
@@ -144,6 +161,7 @@ class SQLiteStateStore(StateStore):
                 config=json.loads(row["config_json"]),
                 created_at=datetime.fromisoformat(row["created_at"]) if row["created_at"] else datetime.now(timezone.utc),
                 env_snapshot=json.loads(row["env_snapshot_json"]) if row["env_snapshot_json"] else {},
+                finished_at=datetime.fromisoformat(row["finished_at"]) if row["finished_at"] else None,
             )
             for row in rows
         ]

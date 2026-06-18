@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
+from datetime import datetime
 
 from finetuneharness.state.models import ArtifactRecord, EventRecord, RunRecord, RunStatus, TaskRecord, TaskStatus
 
@@ -13,6 +16,9 @@ class StateStore(ABC):
 
     @abstractmethod
     def update_run_status(self, run_id: str, status: RunStatus) -> None: ...
+
+    @abstractmethod
+    def update_run_finished_at(self, run_id: str, finished_at: "datetime") -> None: ...
 
     @abstractmethod
     def get_run(self, run_id: str) -> RunRecord | None: ...

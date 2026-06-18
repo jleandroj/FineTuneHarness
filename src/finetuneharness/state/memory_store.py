@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import replace
+from datetime import datetime
 
 from finetuneharness.orchestrator.lifecycle import ensure_task_transition
 from finetuneharness.state.leases import Lease, utc_now
@@ -29,6 +30,13 @@ class InMemoryStateStore(StateStore):
         with self._lock:
             run = self._runs[run_id]
             self._runs[run_id] = replace(run, status=status)
+
+    def update_run_finished_at(self, run_id: str, finished_at: datetime) -> None:
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                raise KeyError(f"unknown run_id: {run_id}")
+            self._runs[run_id] = replace(run, finished_at=finished_at)
 
     def get_run(self, run_id: str) -> RunRecord | None:
         with self._lock:
