@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import pickle
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -99,10 +101,15 @@ class FirejailSandbox:
 
     def run(self, handler, task) -> dict[str, object]:
         payload = pickle.dumps((handler, task))
+        # Use sys.executable so the subprocess runs in the same venv, and pass
+        # the parent's sys.path as PYTHONPATH so handlers defined in installed
+        # packages (and test modules) are importable in the child process.
+        pythonpath = os.pathsep.join(p for p in sys.path if p)
         cmd = [
             "firejail", "--quiet", "--net=none", "--private-tmp",
+            f"--env=PYTHONPATH={pythonpath}",
             *self._extra_args,
-            "python3", "-c", self._RUNNER,
+            sys.executable, "-c", self._RUNNER,
         ]
         proc = subprocess.run(cmd, input=payload, capture_output=True, check=False)
         try:

@@ -21,6 +21,7 @@ from finetuneharness.state.models import RunStatus, TaskRecord, TaskStatus
 from finetuneharness.state.sqlite import SQLiteStateStore
 from finetuneharness.orchestrator.runner import FineTuneRunner
 from finetuneharness.executor.worker import LocalWorker
+from finetuneharness.executor.policy import RetryPolicy
 
 _BASE_CONFIG = {
     "project": {"name": "hook-test"},
@@ -116,6 +117,57 @@ class TestCheckpointHook:
         )
         assert stored.payload == payload_before, (
             f"store payload changed after run: before={payload_before}, after={stored.payload}"
+        )
+
+    def test_checkpoint_dir_present_in_handler_on_retry(self, tmp_path):
+        """checkpoint_dir must be injected by CheckpointHook on every attempt, including retries.
+
+        Regression guard: before_task fires fresh on each run_once call because the worker
+        creates a new working_task copy each time. If someone changes that, retries would
+        run without checkpoint_dir and the handler wouldn't know where to resume from.
+        """
+        store = SQLiteStateStore(tmp_path / "state.db")
+        runner = FineTuneRunner(store)
+        registry = HookRegistry()
+
+        ckpt_dir = tmp_path / "checkpoints"
+        hook = CheckpointHook(checkpoint_dir=str(ckpt_dir))
+        registry.register("before_task", hook.before_task)
+
+        run_id = runner.create_run(
+            name="r", config=_BASE_CONFIG,
+            tasks=[{"task_key": "retry_task", "max_attempts": 2}],
+        )
+
+        checkpoint_dirs_seen: list[str | None] = []
+        attempt = 0
+
+        def handler(task):
+            nonlocal attempt
+            attempt += 1
+            checkpoint_dirs_seen.append(task.payload.get("checkpoint_dir"))
+            if attempt == 1:
+                raise RuntimeError("first attempt fails")
+            return {"ok": True}
+
+        worker = LocalWorker(
+            worker_id="w", store=store, runner=runner, hooks=registry,
+            retry_policy=RetryPolicy(max_attempts=2),
+        )
+
+        try:
+            worker.run_once(run_id=run_id, handler=handler)
+        except RuntimeError:
+            pass  # expected on attempt 1
+
+        worker.run_once(run_id=run_id, handler=handler)  # retry succeeds
+
+        assert len(checkpoint_dirs_seen) == 2
+        assert checkpoint_dirs_seen[0] == str(ckpt_dir), (
+            f"checkpoint_dir missing from handler on attempt 1: {checkpoint_dirs_seen[0]}"
+        )
+        assert checkpoint_dirs_seen[1] == str(ckpt_dir), (
+            f"checkpoint_dir missing from handler on retry (attempt 2): {checkpoint_dirs_seen[1]}"
         )
 
 

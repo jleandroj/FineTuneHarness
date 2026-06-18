@@ -61,6 +61,47 @@ def test_apply_seed_rejects_non_int():
 
 # ── Worker applies seed before handler ───────────────────────────────────────
 
+def test_seed_applied_before_before_task_hooks():
+    """apply_seed must fire before before_task hooks, not just before the handler.
+
+    Regression guard: in worker.py the order is:
+      1. apply_seed(_run.seed)
+      2. hooks.fire("before_task")   ← hook sees seeded state
+      3. handler()
+
+    If someone swaps 1 and 2, before_task hooks would see non-deterministic RNG.
+    This matters for hooks that use randomness (e.g. data augmentation hooks).
+    """
+    from finetuneharness.executor.worker import LocalWorker
+    from finetuneharness.orchestrator.hooks import HookRegistry
+    from finetuneharness.executor.seeding import apply_seed as _apply_seed
+
+    store = InMemoryStateStore()
+    runner = FineTuneRunner(store)
+    registry = HookRegistry()
+
+    hook_random_value: list[float] = []
+
+    def before_task_hook(task):
+        hook_random_value.append(random.random())
+
+    registry.register("before_task", before_task_hook)
+
+    # Expected: first random value immediately after apply_seed(42)
+    _apply_seed(42)
+    expected = random.random()
+
+    run_id = runner.create_run(name="r", config=_BASE_CONFIG, tasks=[{"task_key": "a"}])
+    worker = LocalWorker(worker_id="w", store=store, runner=runner, hooks=registry)
+    worker.run_once(run_id=run_id, handler=lambda t: {})
+
+    assert len(hook_random_value) == 1
+    assert hook_random_value[0] == expected, (
+        f"before_task hook saw {hook_random_value[0]!r}, expected {expected!r} — "
+        "apply_seed fired after hooks, not before (ordering regression)"
+    )
+
+
 def test_worker_applies_seed_before_handler():
     """Two tasks in two separate runs with the same seed should see identical
     random state at the start of the handler."""

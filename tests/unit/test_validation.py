@@ -99,3 +99,33 @@ def test_executor_max_workers_absent_passes() -> None:
     """max_workers is optional — omitting it must not raise."""
     cfg = {**_VALID, "executor": {"kind": "local"}}
     validate_run_config(cfg)
+
+
+# ── Regression: actual config files must pass validation ─────────────────────
+# The seed was previously nested under experiment.seed (bug). These tests load
+# the real JSON files so a future structural change is caught immediately.
+
+import json
+from pathlib import Path
+
+_CONFIGS_ROOT = Path(__file__).parents[2] / "configs"
+
+
+def test_prod_config_passes_validation() -> None:
+    """configs/production/prod_config.json must always pass validate_run_config.
+
+    Regression guard: seed was nested under experiment.seed before the fix.
+    If anyone moves it back, this test fails before the bug reaches a real run.
+    """
+    cfg = json.loads((_CONFIGS_ROOT / "production" / "prod_config.json").read_text())
+    validate_run_config(cfg)
+
+
+def test_dev_config_passes_validation() -> None:
+    cfg = json.loads((_CONFIGS_ROOT / "local" / "dev_config.json").read_text())
+    validate_run_config(cfg)
+
+
+def test_ablation_config_passes_validation() -> None:
+    cfg = json.loads((_CONFIGS_ROOT / "experiments" / "ablation_config.json").read_text())
+    validate_run_config(cfg)
