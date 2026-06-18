@@ -13,16 +13,15 @@ from __future__ import annotations
 import fcntl
 import gc
 import json
-import os
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from finetuneharness.observability.logging import get_logger
 from finetuneharness.orchestrator.hooks import HookRegistry
-from finetuneharness.state.models import RunStatus, TaskRecord, TaskStatus
+from finetuneharness.state.models import RunStatus, TaskRecord
 
 try:
     import torch

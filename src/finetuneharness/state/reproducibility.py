@@ -92,6 +92,15 @@ def assess_reproducibility(
         missing.append("env_snapshot.git_commit")
 
     det = run.env_snapshot.get("determinism_env", {})
+    # Determinism must be FORCED for results to be reproducible, not merely
+    # metadata-complete. A run that did not force it cannot be PASS (capped below).
+    determinism_forced = bool(det.get("harness_enforces_determinism"))
+    if not determinism_forced:
+        warnings.append(
+            "deterministic algorithms were not forced for this run "
+            "(torch.use_deterministic_algorithms / cudnn.deterministic) — results may "
+            "not be bit-for-bit reproducible even with full metadata."
+        )
     if det.get("CUBLAS_WORKSPACE_CONFIG") is None:
         warnings.append(
             "CUBLAS_WORKSPACE_CONFIG was not set — cuBLAS may use non-deterministic algorithms. "
@@ -146,7 +155,17 @@ def assess_reproducibility(
             warnings=warnings,
         )
 
-    # ── PASS ──────────────────────────────────────────────────────────────────
+    # ── PASS (capped to PARTIAL if determinism was not forced) ───────────────
+    # Full metadata + a container digest, but if deterministic algorithms were not
+    # forced the results are not bit-for-bit replayable, so this is not a true PASS.
+    if not determinism_forced:
+        return ReproducibilityAssessment(
+            level="PARTIAL",
+            bitwise_reproducible=False,
+            replayable=True,
+            missing_fields=[],
+            warnings=warnings,
+        )
     return ReproducibilityAssessment(
         level="PASS",
         bitwise_reproducible=False,  # bit-exact requires deterministic ops too

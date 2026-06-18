@@ -6,8 +6,6 @@ from __future__ import annotations
 
 import math
 
-import pytest
-
 from finetuneharness.evaluation.validator import ResultStatus, validate_result
 
 
@@ -210,3 +208,32 @@ def test_valid_high_accuracy_result():
     assert outcome.status == ResultStatus.SUCCEEDED_VALIDATED
     assert outcome.poor_performance is False
     assert outcome.degeneracy_flag is False
+
+
+# --- Adapter (LoRA/PEFT) degeneration ---
+
+def test_lora_adapter_not_loaded_is_degenerate() -> None:
+    from finetuneharness.evaluation.validator import ResultStatus, validate_result
+
+    outcome = validate_result({"accuracy": 0.92, "method": "lora", "adapter_loaded": False})
+    assert outcome.status is ResultStatus.DEGENERATE_RESULT
+    assert outcome.degeneracy_flag is True
+    assert any("adapter_loaded" in e for e in outcome.validation_errors)
+
+
+def test_lora_zero_trainable_params_is_degenerate() -> None:
+    from finetuneharness.evaluation.validator import ResultStatus, validate_result
+
+    outcome = validate_result({"accuracy": 0.92, "method": "lora", "trainable_params": 0})
+    assert outcome.status is ResultStatus.DEGENERATE_RESULT
+    assert any("trainable_params" in e for e in outcome.validation_errors)
+
+
+def test_healthy_lora_adapter_is_valid() -> None:
+    from finetuneharness.evaluation.validator import ResultStatus, validate_result
+
+    outcome = validate_result({
+        "accuracy": 0.92, "method": "lora",
+        "adapter_loaded": True, "trainable_params": 4096, "total_params": 1_000_000,
+    })
+    assert outcome.status is ResultStatus.SUCCEEDED_VALIDATED

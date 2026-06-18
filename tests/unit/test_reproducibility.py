@@ -142,6 +142,7 @@ def test_reproducibility_assessment_partial_without_container_digest():
 def test_reproducibility_assessment_pass_with_container_digest_and_required_hashes():
     run = _run_record(env_snapshot={
         "git_commit": "abcdef12",
+        "determinism_env": {"harness_enforces_determinism": True},
         "container": {
             "engine": "docker",
             "image": "my-image:v1.0",
@@ -152,6 +153,18 @@ def test_reproducibility_assessment_pass_with_container_digest_and_required_hash
     assert result.level == "PASS"
     assert result.replayable is True
     assert not result.missing_fields
+
+
+def test_assessment_degrades_to_partial_without_forced_determinism():
+    """Full metadata + container digest, but determinism not forced -> not PASS."""
+    run = _run_record(env_snapshot={
+        "git_commit": "abcdef12",
+        "container": {"engine": "docker", "digest": "sha256:img"},
+        # no determinism_env.harness_enforces_determinism
+    })
+    result = assess_reproducibility(run)
+    assert result.level == "PARTIAL"
+    assert any("deterministic algorithms were not forced" in w for w in result.warnings)
 
 
 # ── 11. dirty git state adds warning ──────────────────────────────────────────

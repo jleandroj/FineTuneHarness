@@ -58,6 +58,11 @@ def apply_seed(seed: int) -> None:
     except ImportError:
         pass
 
+    # CUBLAS_WORKSPACE_CONFIG must be set BEFORE torch.use_deterministic_algorithms
+    # for deterministic CUDA matmuls; set it first.
+    if "CUBLAS_WORKSPACE_CONFIG" not in os.environ:
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
     try:
         import torch
         torch.manual_seed(seed)
@@ -66,8 +71,17 @@ def apply_seed(seed: int) -> None:
                 torch.cuda.manual_seed_all(seed)
         except RuntimeError:
             pass
+        # Force deterministic algorithms. warn_only=True so ops without a
+        # deterministic implementation warn instead of raising (the run still
+        # proceeds). cuDNN is pinned to deterministic + no autotuning.
+        try:
+            torch.use_deterministic_algorithms(True, warn_only=True)
+        except Exception:
+            pass
+        try:
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+        except Exception:
+            pass
     except ImportError:
         pass
-
-    if "CUBLAS_WORKSPACE_CONFIG" not in os.environ:
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"

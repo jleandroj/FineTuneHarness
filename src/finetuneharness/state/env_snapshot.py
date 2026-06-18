@@ -185,10 +185,15 @@ def _hardware_info() -> dict[str, Any]:
     return info
 
 
-def _determinism_env() -> dict[str, str | None]:
-    """Capture env vars that control GPU/CPU determinism at run time."""
+def _determinism_env() -> dict[str, Any]:
+    """Capture determinism-relevant env vars and the harness's determinism policy."""
     vars_ = ("CUBLAS_WORKSPACE_CONFIG", "CUDA_LAUNCH_BLOCKING", "PYTHONHASHSEED")
-    return {v: os.environ.get(v) for v in vars_}
+    snap: dict[str, Any] = {v: os.environ.get(v) for v in vars_}
+    # The harness forces deterministic algorithms in apply_seed before every task
+    # (torch.use_deterministic_algorithms + cudnn.deterministic). Record that policy
+    # so assess_reproducibility can degrade runs that lack it (older/external runs).
+    snap["harness_enforces_determinism"] = True
+    return snap
 
 
 def _cuda_info() -> dict[str, Any] | None:

@@ -5,7 +5,7 @@ Defines SkillSpec contract and provides a registry for fine-tuning techniques.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 __all__ = [

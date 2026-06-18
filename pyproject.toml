@@ -18,6 +18,11 @@ dependencies = []
 gpu = [
   "nvidia-ml-py>=12.0",
 ]
+# Dependencies for the reference LoRA handler (finetuneharness.examples.lora_handler).
+lora = [
+  "torch>=2.2",
+  "peft>=0.10",
+]
 dev = [
   "pytest>=8.2",
   "ruff>=0.5",
@@ -36,6 +41,11 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# registry/ deliberately re-exports submodules after defining its public surface,
+# so module-level imports are not all at the top.
+"src/finetuneharness/registry/__init__.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.11"

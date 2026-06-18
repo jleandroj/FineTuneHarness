@@ -34,7 +34,17 @@ def train(task: "TaskRecord") -> dict[str, Any]:
     lr = float(payload.get("lr", 0.05))
     hidden = int(payload.get("hidden", 16))
     n_samples = int(payload.get("samples", 128))
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Device pinning: payload["device"] wins (e.g. "cuda", "cuda:1", "cpu"); else
+    # auto. Requesting cuda when it is unavailable is a hard error, not a silent
+    # CPU fallback, so a GPU run cannot quietly run on CPU.
+    requested = payload.get("device")
+    if requested:
+        if str(requested).startswith("cuda") and not torch.cuda.is_available():
+            raise RuntimeError(f"device {requested!r} requested but CUDA is not available")
+        device = str(requested)
+    else:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Synthetic, separable-ish binary task. The harness already seeded torch, so
     # these draws (and thus the whole run) are reproducible for a fixed seed.
