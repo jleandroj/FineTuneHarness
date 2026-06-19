@@ -67,28 +67,47 @@ class ConcurrencyConfig:
     """Admission knobs for resource-aware draining.
 
     mode:           "sequential" (one task at a time) or "resource_aware".
-    min_free_mb:    do not admit a *further* task while free GPU memory is below
-                    this headroom. The first task is always admitted (otherwise an
-                    already-busy GPU would deadlock the run).
-    max_concurrent: hard ceiling on in-flight tasks regardless of free memory.
-    settle_seconds: pause after admitting a task before re-reading memory, so the
-                    new task's allocation is reflected (mitigates the cold-start
-                    race where an empty GPU admits everything at once).
+    admission:      which live signal gates a *further* task:
+                    "memory" (default) admits while free GPU memory >= min_free_mb;
+                    "utilization" admits while GPU utilization <= max_util_pct. Use
+                    "utilization" on unified-memory GPUs (GB10/GH200) where NVML does
+                    NOT report free memory but DOES report utilization — there the
+                    bottleneck is compute, not memory, so a busy GPU self-throttles.
+    min_free_mb:    [memory admission] do not admit a *further* task while free GPU
+                    memory is below this headroom. The first task is always admitted
+                    (otherwise an already-busy GPU would deadlock the run).
+    max_util_pct:   [utilization admission] do not admit a *further* task while GPU
+                    utilization is above this percent. The first task is always
+                    admitted. A single compute-heavy task already pins utilization
+                    near 100%, so the run converges toward ~1 in-flight for heavy
+                    tasks and admits many for light ones — it adapts to the workload.
+    max_concurrent: hard ceiling on in-flight tasks regardless of the live signal.
+    settle_seconds: pause after admitting a task before re-reading the signal, so the
+                    new task's load is reflected (mitigates the cold-start race where
+                    an idle GPU admits everything at once; doubly important for the
+                    utilization signal, which is instantaneous/noisy between kernels).
     max_oom_retries: how many times a single task may be requeued after OOM before
                     it is marked FAILED for good.
     """
 
     mode: str = "sequential"
+    admission: str = "memory"
     min_free_mb: float = 2000.0
+    max_util_pct: float = 95.0
     max_concurrent: int = 8
     settle_seconds: float = 1.0
     max_oom_retries: int = 5
 
     VALID_MODES = ("sequential", "resource_aware")
+    VALID_ADMISSION = ("memory", "utilization")
 
     @property
     def is_resource_aware(self) -> bool:
         return self.mode == "resource_aware"
+
+    @property
+    def is_utilization_admission(self) -> bool:
+        return self.admission == "utilization"
 
 
 @runtime_checkable
@@ -102,6 +121,17 @@ class ResourceMonitor(Protocol):
 
     def free_gpu_memory_mb(self) -> float | None:
         """Free MB on the most-constrained device (min across devices), or None."""
+        ...
+
+    def utilization_per_device(self) -> list[float] | None:
+        """GPU utilization percent [0,100] for each physical GPU (index-aligned),
+        or None when no GPU is visible/detectable.
+
+        This is the admission signal for unified-memory GPUs where
+        ``free_memory_per_device`` returns None but the device still reports
+        utilization. Like the memory probe, a None return means 'no signal' and the
+        scheduler falls back to sequential draining.
+        """
         ...
 
 
@@ -185,12 +215,39 @@ class NvmlMonitor:
         per = self.free_memory_per_device()
         return min(per) if per else None
 
+    def utilization_per_device(self) -> list[float] | None:
+        """GPU utilization percent per device via NVML, falling back to nvidia-smi.
+
+        Unlike free memory, utilization IS reported on unified-memory GPUs
+        (Grace-Blackwell GB10), so this is the usable admission signal there.
+        """
+        if self._pynvml is not None:
+            try:
+                p = self._pynvml
+                count = p.nvmlDeviceGetCount()
+                if count == 0:
+                    return None
+                self._warn_if_multigpu(count)
+                utils = []
+                for i in range(count):
+                    handle = p.nvmlDeviceGetHandleByIndex(i)
+                    rates = p.nvmlDeviceGetUtilizationRates(handle)
+                    utils.append(float(rates.gpu))
+                return utils or None
+            except Exception:
+                self._warn_no_signal_once("nvml")
+        return self._nvidia_smi_query_per_device("utilization.gpu")
+
     def _nvidia_smi_per_device(self) -> list[float] | None:
+        return self._nvidia_smi_query_per_device("memory.free")
+
+    def _nvidia_smi_query_per_device(self, field: str) -> list[float] | None:
+        """Run `nvidia-smi --query-gpu=<field>` and parse one float per device."""
         if shutil.which("nvidia-smi") is None:
             return None
         try:
             out = subprocess.run(
-                ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                ["nvidia-smi", f"--query-gpu={field}", "--format=csv,noheader,nounits"],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -203,7 +260,7 @@ class NvmlMonitor:
         vals = []
         for line in out.stdout.splitlines():
             line = line.strip()
-            if not line:
+            if not line or line.upper() == "[N/A]":
                 continue
             try:
                 vals.append(float(line))
@@ -211,3 +268,22 @@ class NvmlMonitor:
                 continue
         self._warn_if_multigpu(len(vals))
         return vals or None
+
+
+class UtilizationMonitor(NvmlMonitor):
+    """Admission monitor for unified-memory GPUs (GB10, GH200).
+
+    On these devices NVML does NOT report free memory (``free_memory_per_device``
+    returns None), so memory-gated admission would always degrade to sequential.
+    Compute is the real bottleneck, so this monitor gates on GPU utilization
+    instead. It deliberately reports ``free_memory_per_device() -> None`` so it can
+    only be used with ``ConcurrencyConfig(admission="utilization")``; pairing it
+    with memory admission is a configuration error that falls back to sequential
+    rather than silently mis-gating.
+    """
+
+    def free_memory_per_device(self) -> list[float] | None:  # noqa: D102 — see class doc
+        return None
+
+    def free_gpu_memory_mb(self) -> float | None:  # noqa: D102 — see class doc
+        return None

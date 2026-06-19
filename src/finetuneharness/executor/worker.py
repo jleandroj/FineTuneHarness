@@ -4,11 +4,10 @@ import dataclasses
 import multiprocessing as mp
 import os
 import queue as _queue
+import threading
 import time
 import uuid
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from typing import Callable, NoReturn
 
@@ -530,7 +529,11 @@ class LocalWorker:
         otherwise this raises (concrete hooks/sandbox cannot cross to a spawned
         child). If the monitor reports no GPU, this degrades to sequential ``drain``.
         """
-        per_device = monitor.free_memory_per_device()
+        util_admission = concurrency.is_utilization_admission
+        if util_admission:
+            per_device = monitor.utilization_per_device()
+        else:
+            per_device = monitor.free_memory_per_device()
         if per_device is None:
             self._log.info("no_gpu_detected_draining_sequentially", extra={"run_id": run_id})
             return self.drain(run_id=run_id, handler=handler, stop_fn=stop_fn)
@@ -602,11 +605,16 @@ class LocalWorker:
         def _free_for(device: int, live: list[float]) -> float:
             return live[device] if device < len(live) else 0.0
 
+        def _util_for(device: int, live: list[float]) -> float:
+            # Out-of-range device reads as fully saturated (no headroom).
+            return live[device] if device < len(live) else 100.0
+
         succeeded = 0
         stopped = False
         child_seq = 0
         ceiling = max(1, concurrency.max_concurrent)
         min_free = concurrency.min_free_mb
+        max_util = concurrency.max_util_pct
         # pid -> (Process, worker_id, device_index)
         in_flight: dict[int, tuple[mp.Process, str, int]] = {}
         try:
@@ -617,16 +625,29 @@ class LocalWorker:
                     and len(in_flight) < ceiling
                     and self._count_leaseable(run_id) > 0
                 ):
-                    live = monitor.free_memory_per_device() or per_device
                     inflight_by_dev: Counter[int] = Counter(d for _, _, d in in_flight.values())
-                    order = sorted(range(num_devices), key=lambda d: _free_for(d, live), reverse=True)
+                    if util_admission:
+                        # Compute is the bottleneck: prefer the LEAST-utilized device
+                        # (ascending), admit while utilization <= max_util_pct.
+                        live = monitor.utilization_per_device() or per_device
+                        order = sorted(range(num_devices), key=lambda d: _util_for(d, live))
+                    else:
+                        # Memory is the bottleneck: prefer the MOST-free device
+                        # (descending), admit while free memory >= min_free_mb.
+                        live = monitor.free_memory_per_device() or per_device
+                        order = sorted(range(num_devices), key=lambda d: _free_for(d, live), reverse=True)
                     # Prefer an idle device (first task there always proceeds); else a
-                    # busy device that still clears the memory headroom.
+                    # busy device that still clears the admission headroom.
                     device = next((d for d in order if inflight_by_dev[d] == 0), None)
                     if device is None:
-                        device = next(
-                            (d for d in order if _free_for(d, live) >= min_free), None
-                        )
+                        if util_admission:
+                            device = next(
+                                (d for d in order if _util_for(d, live) <= max_util), None
+                            )
+                        else:
+                            device = next(
+                                (d for d in order if _free_for(d, live) >= min_free), None
+                            )
                     if device is None:
                         break  # all devices busy and none has headroom; wait
 
@@ -677,7 +698,11 @@ class LocalWorker:
 
                 entry = in_flight.pop(pid, None)
                 if entry is not None:
-                    entry[0].join()
+                    # Bounded reap: a child whose handler timed out has already
+                    # reported its outcome but its abandoned (daemon) compute thread
+                    # dies only when the process exits. Never block the scheduler on
+                    # it — join briefly, then terminate/kill so the GPU is freed.
+                    _reap_process(entry[0])
                 if outcome == "succeeded":
                     succeeded += 1
                     if stop_fn is not None and stop_fn():
@@ -690,12 +715,22 @@ class LocalWorker:
                         extra={"run_id": run_id, "ceiling": ceiling,
                                "min_free_mb": round(min_free, 1)},
                     )
+                elif outcome == "timeout":
+                    # A task hit its wall-clock timeout: treat like resource
+                    # contention and lower the ceiling so the run converges toward
+                    # sequential instead of timing out task after task.
+                    ceiling = max(1, ceiling - 1)
+                    self._log.info(
+                        "concurrency_backoff_after_timeout",
+                        extra={"run_id": run_id, "ceiling": ceiling},
+                    )
                 # "empty" (lost lease race) / "error" (recorded by run_once): keep going
         finally:
-            # Teardown safety net: join any survivors and recover a task they may
-            # have left non-terminal (early stop, or death during join).
+            # Teardown safety net: reap any survivors (bounded join + kill) and
+            # recover a task they may have left non-terminal (early stop, or death
+            # during join).
             for proc, wid, _dev in in_flight.values():
-                proc.join()
+                _reap_process(proc)
                 self._store.reclaim_dead_worker(
                     run_id=run_id, worker_id=wid, max_reclaims=self._max_oom_retries,
                 )
@@ -733,8 +768,10 @@ class LocalWorker:
                 payload={
                     "worker_id": self.worker_id,
                     "mode": concurrency.mode,
+                    "admission": concurrency.admission,
                     "max_concurrent": concurrency.max_concurrent,
                     "min_free_mb": concurrency.min_free_mb,
+                    "max_util_pct": concurrency.max_util_pct,
                 },
             )
         )
@@ -766,20 +803,34 @@ class LocalWorker:
     ) -> dict[str, object]:
         if timeout_seconds is None:
             return self._sandbox.run(handler, task)
-        # Per-task executor: isolates each timed handler so a hung one leaks only
-        # its own thread and never occupies a slot needed by a later task.
-        executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix=f"worker-{self.worker_id}-task"
-        )
-        future = executor.submit(self._sandbox.run, handler, task)
-        try:
-            return future.result(timeout=timeout_seconds)
-        except FuturesTimeoutError:
+        # Run the handler in a DAEMON thread. Two reasons it must be daemon, not a
+        # ThreadPoolExecutor worker (which is non-daemon):
+        #   1. Preemptive timeout that frees the GPU. Under drain_concurrent each
+        #      task is its own process; a non-daemon handler thread that overran its
+        #      timeout would keep that process alive at exit until the abandoned
+        #      training finished naturally — holding the GPU and dragging down every
+        #      sibling task (the root cause of timeout cascades). A daemon thread is
+        #      torn down the instant the process exits, so the GPU is freed at the
+        #      task's own timeout.
+        #   2. A hung handler still can't be killed mid-call, but abandoning a daemon
+        #      thread never blocks interpreter/process exit.
+        result_box: dict[str, object] = {}
+        error_box: dict[str, BaseException] = {}
+
+        def _target() -> None:
+            try:
+                result_box["v"] = self._sandbox.run(handler, task)
+            except BaseException as exc:  # noqa: BLE001 — relayed to the caller thread
+                error_box["e"] = exc
+
+        t = threading.Thread(target=_target, name=f"worker-{self.worker_id}-task", daemon=True)
+        t.start()
+        t.join(timeout=timeout_seconds)
+        if t.is_alive():
             raise TimeoutError(f"task exceeded timeout of {timeout_seconds}s")
-        finally:
-            # wait=False: a timed-out handler thread cannot be killed; abandon it
-            # so the worker proceeds immediately to the next task.
-            executor.shutdown(wait=False)
+        if "e" in error_box:
+            raise error_box["e"]
+        return result_box["v"]  # type: ignore[return-value]
 
     def _resolve_max_attempts(self, task: TaskRecord) -> int:
         raw = task.payload.get("max_attempts", self._retry_policy.max_attempts)
@@ -845,5 +896,26 @@ def _run_once_subprocess(
     try:
         task = worker.run_once(run_id=run_id, handler=handler)
         result_q.put((os.getpid(), "succeeded" if task is not None else "empty"))
+    except TimeoutError:
+        # run_once already marked the task TIMED_OUT; tell the parent so it lowers
+        # the concurrency ceiling (timeout backoff).
+        result_q.put((os.getpid(), "timeout"))
     except Exception as exc:  # noqa: BLE001 — outcome relayed to the parent
         result_q.put((os.getpid(), "oom" if is_oom_error(exc) else "error"))
+
+
+def _reap_process(proc: "mp.Process", *, grace_seconds: float = 5.0) -> None:
+    """Join *proc* briefly, then terminate/kill it so the scheduler never blocks.
+
+    A child that reported a timeout outcome may still be tearing down an abandoned
+    (daemon) compute thread; a crashed child may be wedged in CUDA teardown. Either
+    way the parent must not block indefinitely on ``join()`` — join for *grace_seconds*,
+    then SIGTERM, then SIGKILL, freeing the GPU the child held.
+    """
+    proc.join(timeout=grace_seconds)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=grace_seconds)
+    if proc.is_alive():
+        proc.kill()
+        proc.join(timeout=grace_seconds)

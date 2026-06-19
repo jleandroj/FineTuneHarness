@@ -7,6 +7,7 @@ from typing import Any
 REQUIRED_TOP_LEVEL_KEYS = frozenset({"project", "executor", "artifacts"})
 
 _VALID_CONCURRENCY_MODES = ("sequential", "resource_aware")
+_VALID_ADMISSION = ("memory", "utilization")
 
 
 def validate_run_config(config: dict[str, Any]) -> None:
@@ -58,6 +59,19 @@ def _validate_concurrency(conc: Any) -> None:
             f"run config 'executor.concurrency.mode' must be one of "
             f"{_VALID_CONCURRENCY_MODES}, got {mode!r}"
         )
+    admission = conc.get("admission", "memory")
+    if admission not in _VALID_ADMISSION:
+        raise ValueError(
+            f"run config 'executor.concurrency.admission' must be one of "
+            f"{_VALID_ADMISSION}, got {admission!r}"
+        )
+    if "max_util_pct" in conc:
+        val = conc["max_util_pct"]
+        if not isinstance(val, (int, float)) or isinstance(val, bool) or not (0 < val <= 100):
+            raise ValueError(
+                f"run config 'executor.concurrency.max_util_pct' must be a number in "
+                f"(0, 100], got {val!r}"
+            )
     for key in ("min_free_mb", "settle_seconds"):
         if key in conc:
             val = conc[key]

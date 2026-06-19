@@ -70,7 +70,9 @@ def _resolve_concurrency(config: dict, args) -> ConcurrencyConfig:
     defaults = ConcurrencyConfig()
     return ConcurrencyConfig(
         mode=conc.get("mode", defaults.mode),
+        admission=conc.get("admission", defaults.admission),
         min_free_mb=conc.get("min_free_mb", defaults.min_free_mb),
+        max_util_pct=conc.get("max_util_pct", defaults.max_util_pct),
         max_concurrent=conc.get("max_concurrent", defaults.max_concurrent),
         settle_seconds=conc.get("settle_seconds", defaults.settle_seconds),
         max_oom_retries=conc.get("max_oom_retries", defaults.max_oom_retries),

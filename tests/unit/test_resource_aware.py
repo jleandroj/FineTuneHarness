@@ -69,6 +69,14 @@ def _h_ok(task):
     return {"accuracy": 0.9, "f1": 0.88}
 
 
+def _h_sleep_long(task):
+    """Sleep far longer than the task's timeout, to exercise preemptive timeout."""
+    import time as _t
+
+    _t.sleep(float(task.payload.get("sleep", 30.0)))
+    return {"accuracy": 0.9, "f1": 0.88}
+
+
 def _h_framework_draw(task):
     """Record torch + numpy global-RNG draws (the harness seeds both before us)."""
     import numpy as np
@@ -199,6 +207,35 @@ def _make_run(tmp_path: Path, tasks: list[dict]) -> tuple[SQLiteStateStore, str]
 def _resource_aware(**kw) -> ConcurrencyConfig:
     kw.setdefault("mode", "resource_aware")
     kw.setdefault("min_free_mb", 1000)
+    kw.setdefault("settle_seconds", 0.0)
+    return ConcurrencyConfig(**kw)
+
+
+class _UtilMonitor:
+    """Fixed GPU-utilization monitor for admission="utilization" tests.
+
+    Reports None for free memory (like a real unified-memory GPU), so it is only
+    usable with utilization admission — pairing it with memory admission degrades
+    to sequential rather than mis-gating.
+    """
+
+    def __init__(self, util_pct) -> None:
+        self._util = None if util_pct is None else [float(util_pct)]
+
+    def utilization_per_device(self) -> list[float] | None:
+        return list(self._util) if self._util is not None else None
+
+    def free_memory_per_device(self) -> list[float] | None:
+        return None
+
+    def free_gpu_memory_mb(self) -> float | None:
+        return None
+
+
+def _util_aware(**kw) -> ConcurrencyConfig:
+    kw.setdefault("mode", "resource_aware")
+    kw.setdefault("admission", "utilization")
+    kw.setdefault("max_util_pct", 95.0)
     kw.setdefault("settle_seconds", 0.0)
     return ConcurrencyConfig(**kw)
 
@@ -361,6 +398,112 @@ def test_low_memory_serializes_admission(tmp_path: Path) -> None:
     )
     assert succeeded == 4
     assert _max_overlap(obs) == 1, "low memory must force one-at-a-time admission"
+
+
+# ── utilization-gated admission (unified-memory GPUs: GB10) ──────────────────
+
+def test_utilization_admission_runs_in_parallel_when_idle(tmp_path: Path) -> None:
+    """Low GPU utilization admits several tasks at once (compute headroom)."""
+    obs = tmp_path / "obs"
+    obs.mkdir()
+    keys = [f"t{i}" for i in range(6)]
+    store, run_id = _make_run(
+        tmp_path, [{"task_key": k, "obs_dir": str(obs), "sleep": 0.4} for k in keys]
+    )
+    worker = LocalWorker(worker_id="w", store=store)
+
+    succeeded = worker.drain_concurrent(
+        run_id=run_id, handler=_h_record,
+        concurrency=_util_aware(max_concurrent=4),
+        monitor=_UtilMonitor(10),  # GPU mostly idle
+    )
+    assert succeeded == 6
+    assert _max_overlap(obs) >= 2, "idle GPU must admit tasks concurrently"
+
+
+def test_high_utilization_serializes_admission(tmp_path: Path) -> None:
+    """A saturated GPU (>max_util_pct) admits one task at a time. The first task on an
+    idle device always proceeds (no deadlock); further admission waits for headroom."""
+    obs = tmp_path / "obs"
+    obs.mkdir()
+    keys = [f"t{i}" for i in range(4)]
+    store, run_id = _make_run(
+        tmp_path, [{"task_key": k, "obs_dir": str(obs), "sleep": 0.1} for k in keys]
+    )
+    worker = LocalWorker(worker_id="w", store=store)
+
+    succeeded = worker.drain_concurrent(
+        run_id=run_id, handler=_h_record,
+        concurrency=_util_aware(max_concurrent=4),
+        monitor=_UtilMonitor(100),  # pinned at 100% utilization
+    )
+    assert succeeded == 4
+    assert _max_overlap(obs) == 1, "saturated GPU must force one-at-a-time admission"
+
+
+def test_utilization_admission_no_signal_falls_back_to_sequential(tmp_path: Path) -> None:
+    """No utilization signal (e.g. no GPU) degrades to sequential draining."""
+    obs = tmp_path / "obs"
+    obs.mkdir()
+    store, run_id = _make_run(
+        tmp_path, [{"task_key": k, "obs_dir": str(obs)} for k in ("a", "b", "c")]
+    )
+    worker = LocalWorker(worker_id="w", store=store)
+    succeeded = worker.drain_concurrent(
+        run_id=run_id, handler=_h_record,
+        concurrency=_util_aware(), monitor=_UtilMonitor(None),
+    )
+    assert succeeded == 3
+    assert all(t.status is TaskStatus.SUCCEEDED for t in store.list_tasks(run_id))
+
+
+# ── preemptive timeout under concurrency (frees the GPU, never hangs) ─────────
+
+def test_timed_out_task_under_concurrency_is_marked_and_does_not_hang(tmp_path: Path) -> None:
+    """A handler that overruns its per-task timeout must be marked TIMED_OUT and the
+    scheduler must return promptly — not block on the abandoned (daemon) compute
+    thread until the sleep finishes. This is the fix for timeout cascades."""
+    store, run_id = _make_run(
+        tmp_path,
+        [{"task_key": "slow", "sleep": 30.0, "timeout_seconds": 1, "max_attempts": 1}],
+    )
+    worker = LocalWorker(worker_id="w", store=store)
+
+    started = time.monotonic()
+    with pytest.raises(DegradedRunError):
+        worker.drain_concurrent(
+            run_id=run_id, handler=_h_sleep_long,
+            concurrency=_util_aware(max_concurrent=2),
+            monitor=_UtilMonitor(10),
+        )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 20, f"timed-out task hung the scheduler for {elapsed:.1f}s (sleep was 30s)"
+    task = store.list_tasks(run_id)[0]
+    assert task.status is TaskStatus.TIMED_OUT
+
+
+def test_run_converges_when_every_task_times_out(tmp_path: Path) -> None:
+    """Several timing-out tasks must still terminate (timeout backoff converges the
+    ceiling toward sequential instead of looping)."""
+    keys = [f"slow{i}" for i in range(4)]
+    store, run_id = _make_run(
+        tmp_path,
+        [{"task_key": k, "sleep": 30.0, "timeout_seconds": 1, "max_attempts": 1} for k in keys],
+    )
+    worker = LocalWorker(worker_id="w", store=store)
+
+    started = time.monotonic()
+    with pytest.raises(DegradedRunError):
+        worker.drain_concurrent(
+            run_id=run_id, handler=_h_sleep_long,
+            concurrency=_util_aware(max_concurrent=4),
+            monitor=_UtilMonitor(10),
+        )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 30, f"timing-out run did not converge ({elapsed:.1f}s)"
+    assert all(t.status is TaskStatus.TIMED_OUT for t in store.list_tasks(run_id))
 
 
 # ── reproducibility (determinism under concurrency) ──────────────────────────

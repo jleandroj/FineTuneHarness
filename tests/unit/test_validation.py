@@ -128,6 +128,27 @@ def test_executor_concurrency_negative_min_free_raises() -> None:
         validate_run_config(cfg)
 
 
+def test_executor_concurrency_utilization_admission_passes() -> None:
+    cfg = {**_VALID, "executor": {"kind": "local", "concurrency": {
+        "mode": "resource_aware", "admission": "utilization", "max_util_pct": 95,
+        "max_concurrent": 32,
+    }}}
+    validate_run_config(cfg)  # must not raise
+
+
+def test_executor_concurrency_bad_admission_raises() -> None:
+    cfg = {**_VALID, "executor": {"kind": "local", "concurrency": {"admission": "psychic"}}}
+    with pytest.raises(ValueError, match="concurrency.admission"):
+        validate_run_config(cfg)
+
+
+def test_executor_concurrency_max_util_pct_out_of_range_raises() -> None:
+    for bad in (0, -5, 101, 150):
+        cfg = {**_VALID, "executor": {"kind": "local", "concurrency": {"max_util_pct": bad}}}
+        with pytest.raises(ValueError, match="max_util_pct"):
+            validate_run_config(cfg)
+
+
 # ── Regression: actual config files must pass validation ─────────────────────
 # The seed was previously nested under experiment.seed (bug). These tests load
 # the real JSON files so a future structural change is caught immediately.
