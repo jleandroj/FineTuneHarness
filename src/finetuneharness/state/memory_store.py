@@ -190,6 +190,29 @@ class InMemoryStateStore(StateStore):
             ))
             return outcome
 
+    def recover_orphaned_tasks(self, *, run_id: str) -> int:
+        """Requeue all RUNNING/LEASED tasks of a run to PENDING (post-crash recovery).
+
+        Operator-invoked; only safe when no worker is active for the run. Parity with
+        SQLite: emits a 'task_recovered' event per task.
+        """
+        with self._lock:
+            count = 0
+            for task in list(self._tasks.values()):
+                if task.run_id == run_id and task.status in (TaskStatus.RUNNING, TaskStatus.LEASED):
+                    prev_owner = task.lease_owner
+                    from_status = task.status.value
+                    self._tasks[task.task_id] = replace(
+                        task, status=TaskStatus.PENDING, lease_owner=None, leased_until=None,
+                    )
+                    self._events.append(EventRecord(
+                        event_id=uuid.uuid4().hex, run_id=run_id, task_id=task.task_id,
+                        kind="task_recovered",
+                        payload={"from_status": from_status, "previous_owner": prev_owner},
+                    ))
+                    count += 1
+            return count
+
     def append_event(self, event: EventRecord) -> None:
         with self._lock:
             self._events.append(event)

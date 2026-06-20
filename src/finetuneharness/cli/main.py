@@ -143,6 +143,13 @@ def main() -> None:
              "Verified against config 'approval.allowed_actors' when present.",
     )
 
+    recover_cmd = sub.add_parser(
+        "recover-run",
+        help="Requeue tasks stranded RUNNING/LEASED by a hard crash (run ONLY when no worker is active)",
+    )
+    recover_cmd.add_argument("--run-id", required=True)
+    recover_cmd.add_argument("--state-db", default=".finetuneharness/state.db")
+
     list_runs_cmd = sub.add_parser("list-runs", help="List all runs in the state DB")
     list_runs_cmd.add_argument("--state-db", default=".finetuneharness/state.db")
     list_runs_cmd.add_argument("--format", dest="fmt", choices=["text", "json"], default="text")
@@ -233,6 +240,21 @@ def main() -> None:
         except DegradedRunError as exc:
             print(str(exc), flush=True)
             raise SystemExit(1)
+        return
+
+    if args.command == "recover-run":
+        store = SQLiteStateStore(Path(args.state_db))
+        run = store.get_run(args.run_id)
+        if run is None:
+            print(f"Error: unknown run_id {args.run_id!r}", flush=True)
+            raise SystemExit(1)
+        n = store.recover_orphaned_tasks(run_id=args.run_id)
+        # Recompute run status so a run stuck "running" with no worker reflects the
+        # requeue (e.g. back to RUNNING/VALIDATED) instead of lying.
+        status = FineTuneRunner(store).refresh_run_status(args.run_id)
+        print(f"Recovered {n} stranded task(s) to PENDING in run {args.run_id} (status: {status.value}).")
+        if n:
+            print(f"Re-run with: finetuneharness run --run-id {args.run_id} --handler MODULE:FUNCTION")
         return
 
     if args.command == "status":
@@ -391,3 +413,7 @@ def main() -> None:
         else:
             print(format_report(report))
         return
+
+
+if __name__ == "__main__":
+    main()

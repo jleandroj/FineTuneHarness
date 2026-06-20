@@ -71,6 +71,22 @@ class StateStore(ABC):
         ...
 
     @abstractmethod
+    def recover_orphaned_tasks(self, *, run_id: str) -> int:
+        """Requeue every RUNNING or LEASED task of a run back to PENDING.
+
+        Operator-invoked post-crash recovery. When the orchestrator process is
+        hard-killed (SIGKILL, power loss) its drain loop never runs its cleanup, so
+        in-flight tasks are stranded RUNNING/LEASED and no automatic path reclaims a
+        RUNNING task (reclaim_dead_worker needs a known worker_id; expired-lease
+        requeue covers only LEASED). This clears the lease and returns them to
+        PENDING so a fresh worker can pick them up. Emits one 'task_recovered' event
+        per task. MUST only be called when no worker is active for the run — it does
+        not check liveness, so requeuing a task another worker is still running would
+        double-execute it. Returns the number of tasks requeued.
+        """
+        ...
+
+    @abstractmethod
     def append_event(self, event: EventRecord) -> None: ...
 
     @abstractmethod

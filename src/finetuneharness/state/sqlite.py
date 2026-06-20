@@ -421,6 +421,42 @@ class SQLiteStateStore(StateStore):
             )
             return outcome
 
+    def recover_orphaned_tasks(self, *, run_id: str) -> int:
+        """Requeue all RUNNING/LEASED tasks of a run to PENDING (post-crash recovery).
+
+        Operator-invoked: only safe when no worker is active for the run. Uses a
+        direct UPDATE (like requeue_expired_leases) so it can move RUNNING tasks,
+        which no automatic path reclaims. Emits a 'task_recovered' event per task.
+        """
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            orphaned = conn.execute(
+                "SELECT task_id, status, lease_owner FROM tasks "
+                "WHERE run_id = ? AND status IN (?, ?)",
+                (run_id, TaskStatus.RUNNING.value, TaskStatus.LEASED.value),
+            ).fetchall()
+            if not orphaned:
+                return 0
+            conn.execute(
+                "UPDATE tasks SET status = ?, lease_owner = NULL, leased_until = NULL "
+                "WHERE run_id = ? AND status IN (?, ?)",
+                (TaskStatus.PENDING.value, run_id, TaskStatus.RUNNING.value, TaskStatus.LEASED.value),
+            )
+            for row in orphaned:
+                conn.execute(
+                    "INSERT INTO events (event_id, run_id, task_id, kind, payload_json, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        uuid.uuid4().hex, run_id, row["task_id"], "task_recovered",
+                        json.dumps(
+                            {"from_status": row["status"], "previous_owner": row["lease_owner"]},
+                            sort_keys=True,
+                        ),
+                        utc_now().isoformat(),
+                    ),
+                )
+            return len(orphaned)
+
     def append_event(self, event: EventRecord) -> None:
         with closing(self._connect()) as conn, conn:
             conn.execute(
