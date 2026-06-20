@@ -21,5 +21,11 @@ jobs:
           pip install numpy torch --index-url https://download.pytorch.org/whl/cpu
       - name: Lint (library)
         run: ruff check src
+      - name: Type-check (informational until the strict-mypy debt is paid down)
+        # mypy --strict currently reports pre-existing errors (see docs/ROADMAP).
+        # Run it non-blocking so type drift is visible on every PR without gating,
+        # then flip continue-on-error to false once the baseline is clean.
+        continue-on-error: true
+        run: mypy src
       - name: Test (GPU tests auto-skip without CUDA)
         run: pytest -q

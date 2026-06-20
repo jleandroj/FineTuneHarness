@@ -71,12 +71,16 @@ tests/unit/      — 42 tests
   inspection. run_once raises DegenerateResultError; drain() surfaces it via
   DegradedRunError. A run with any degenerate task can never be COMPLETED.
 - SQLite with WAL + BEGIN IMMEDIATE prevents double-execution under concurrency
-- Timeout is best-effort, NOT preemptive for in-process handlers: it makes the
-  worker stop waiting and move on, but Python cannot kill the handler thread, so a
-  hung in-process handler keeps using CPU/GPU until it returns (its result is
-  discarded). Each timed task runs in its own single-use executor, so a hung
-  handler never starves later tasks. For TRUE preemption that frees the GPU, run
-  under FirejailSandbox (subprocess) with a subprocess timeout.
+- Timeout: the handler runs in a DAEMON thread, so when it overruns the worker stops
+  waiting AND the thread cannot keep the process alive at exit. Under
+  `drain_concurrent` (each task is its own spawned process) this is effectively
+  PREEMPTIVE — the child exits at the timeout, its CUDA context is torn down and the
+  GPU is freed; the task is marked TIMED_OUT and the ceiling is lowered (timeout
+  backoff). The parent reaps each finished child with a bounded join→terminate→kill,
+  so it never blocks on a process wedged in CUDA teardown. In the sequential
+  in-process `drain` path the abandoned daemon thread keeps using CPU/GPU until it
+  returns naturally (result discarded) — for hard preemption there, run under
+  FirejailSandbox (subprocess) with a subprocess timeout. See docs/operations.md.
 - Hooks fire at: before_task, after_task_success, after_task_failure, after_task_timeout, on_run_status_changed
 - Concurrency: there is NO static `max_workers` knob (the old one was dead — it
   never sized any pool). `worker.drain()` runs tasks one at a time;
@@ -87,6 +91,15 @@ tests/unit/      — 42 tests
   OOM is still possible; a GPU OOM is treated as transient (`is_oom_error`),
   requeues the task up to `max_oom_retries` times, and lowers the concurrency
   ceiling (converging toward sequential under pressure).
+- **Admission signal — `admission="memory"` (default) or `"utilization"`.** On
+  unified-memory GPUs (Grace-Blackwell GB10, GH200) NVML reports GPU *utilization* but
+  NOT free memory (`memory.free`=`[N/A]`), so memory gating is impossible. Set
+  `admission="utilization"` to admit while GPU utilization ≤ `max_util_pct` (via
+  `UtilizationMonitor`, or `NvmlMonitor` which also implements the signal). The signal
+  is instantaneous/noisy (it dips during data-load/eval), so the low `max_concurrent`
+  is the real throttle there — CALIBRATE it (a single GB10 needed `max_concurrent=4,
+  max_util_pct=70` to avoid timeout cascades; 32/95 hit 53% timeouts). See
+  docs/operations.md.
 - **drain_concurrent is PROCESS-ISOLATED via `spawn` (reproducibility- AND
   GPU-critical).** Each task runs in its own `multiprocessing.spawn` process, for two
   reasons: (a) `apply_seed` mutates the *process-global* numpy/torch/random RNG, so
@@ -121,6 +134,14 @@ tests/unit/      — 42 tests
   spent (`task_abandoned` event) so the run terminates as degraded instead of hanging
   on a lost task or returning false success. Each child gets a unique
   `worker_id` (`<worker>-c<n>`) precisely so its stranded task is identifiable.
+- **Hard-crash recovery (operator-invoked).** If the orchestrator process ITSELF is
+  hard-killed (SIGKILL/power loss), its drain loop never runs the in-loop reclaim, so
+  tasks are stranded RUNNING/LEASED with no automatic recovery. `finetuneharness
+  recover-run --run-id <id>` (→ `store.recover_orphaned_tasks`) requeues all
+  RUNNING/LEASED tasks of the run to PENDING (emits `task_recovered`) so a fresh
+  worker can resume. Run ONLY when no worker is active — it does not check liveness.
+  A graceful stop (SIGINT/SIGTERM) does NOT need this: the `finally` reaps children
+  and requeues their tasks. See docs/operations.md.
 - Execution mode is recorded: both `drain`/`drain_concurrent` emit a `drain_started`
   event with the mode. `assess_reproducibility(run, events)` and
   `export_manifest(run, tasks, artifacts, events)` accept events and surface the
