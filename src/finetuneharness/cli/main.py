@@ -150,6 +150,14 @@ def main() -> None:
     recover_cmd.add_argument("--run-id", required=True)
     recover_cmd.add_argument("--state-db", default=".finetuneharness/state.db")
 
+    preflight_cmd = sub.add_parser(
+        "preflight",
+        help="Check whether it is safe to edit runtime code now (no run has in-flight "
+             "tasks). Exits 1 if a run is active. Run before editing the harness.",
+    )
+    preflight_cmd.add_argument("--state-db", default=".finetuneharness/state.db")
+    preflight_cmd.add_argument("--format", dest="fmt", choices=["text", "json"], default="text")
+
     verify_cmd = sub.add_parser(
         "verify-run",
         help="Independently re-check a run's SUCCEEDED results (catches fabricated/"
@@ -264,6 +272,33 @@ def main() -> None:
         print(f"Recovered {n} stranded task(s) to PENDING in run {args.run_id} (status: {status.value}).")
         if n:
             print(f"Re-run with: finetuneharness run --run-id {args.run_id} --handler MODULE:FUNCTION")
+        return
+
+    if args.command == "preflight":
+        from finetuneharness.verification import preflight
+        store = SQLiteStateStore(Path(args.state_db))
+        report = preflight(store)
+        if args.fmt == "json":
+            print(json.dumps({
+                "safe_to_edit": report.safe_to_edit,
+                "active_runs": [
+                    {"run_id": a.run_id, "name": a.name, "in_flight": a.in_flight,
+                     "lease_owners": a.lease_owners}
+                    for a in report.active
+                ],
+            }, indent=2))
+        else:
+            if report.safe_to_edit:
+                print("✓ preflight: SAFE to edit — no run has in-flight tasks.")
+            else:
+                print("✗ preflight: NOT safe to edit — runs are active (in-flight tasks):")
+                for a in report.active:
+                    print(f"  - {a.run_id[:12]} {a.name}: {a.in_flight} in-flight "
+                          f"(owners: {a.lease_owners or '—'})")
+                print("  Editing runtime modules now can corrupt a live run. "
+                      "Wait, or `recover-run` if a run is crashed (stranded RUNNING).")
+        if not report.safe_to_edit:
+            raise SystemExit(1)
         return
 
     if args.command == "verify-run":
