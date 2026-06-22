@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import uuid
 from pathlib import Path
 
@@ -228,10 +229,14 @@ def main() -> None:
             raise SystemExit(1)
 
         if args.skip_approval:
-            # Audit who bypassed the gate.
+            # Audit who bypassed the gate — AND say so loudly (a disabled guardrail
+            # must never be a silent no-op).
+            actor = resolve_actor()
+            print(f"WARNING: approval gate BYPASSED by {actor!r} (--skip-approval). "
+                  f"This run was not approved.", file=sys.stderr, flush=True)
             store.append_event(EventRecord(
                 event_id=uuid.uuid4().hex, run_id=args.run_id, task_id=None,
-                kind="approval_skipped", payload={"actor": resolve_actor()},
+                kind="approval_skipped", payload={"actor": actor},
             ))
         elif not _is_approved(store, args.run_id):
             print(
@@ -244,6 +249,10 @@ def main() -> None:
 
         handler = _load_handler(args.handler)
         concurrency = _resolve_concurrency(run.config, args)
+        # Surface self-sabotaging admission configs loudly before draining.
+        from finetuneharness.verification import check_concurrency_config
+        for f in check_concurrency_config(concurrency):
+            print(f"WARNING: config guardrail [{f.code}]: {f.detail}", file=sys.stderr, flush=True)
         worker = LocalWorker(worker_id="cli", store=store)
         try:
             if concurrency.is_resource_aware:

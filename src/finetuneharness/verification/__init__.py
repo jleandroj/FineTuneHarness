@@ -7,6 +7,7 @@ docs/LIE_RESISTANCE_AUDIT.md.
 """
 from __future__ import annotations
 
+from finetuneharness.verification.guardrails import check_concurrency_config
 from finetuneharness.verification.integrity import (
     ActiveRun,
     PreflightReport,
@@ -23,4 +24,5 @@ from finetuneharness.verification.verifier import (
 __all__ = [
     "Finding", "VerificationReport", "Verdict", "verify_run",
     "ActiveRun", "PreflightReport", "find_active_runs", "preflight",
+    "check_concurrency_config",
 ]
