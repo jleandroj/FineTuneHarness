@@ -393,9 +393,13 @@ class TestBiologyInputValidator:
         with pytest.raises(ValueError, match="k-mer"):
             bio_validator({**self._VALID_GENERIC, "k": 0})
 
+    def test_k_at_upper_bound_passes(self, bio_validator):
+        # The ablation grid uses k=1..9; 9 is valid (range is [1, 9]).
+        bio_validator({**self._VALID_GENERIC, "k": 9})
+
     def test_k_too_large_rejected(self, bio_validator):
         with pytest.raises(ValueError, match="k-mer"):
-            bio_validator({**self._VALID_GENERIC, "k": 7})
+            bio_validator({**self._VALID_GENERIC, "k": 10})
 
     def test_max_per_species_zero_rejected(self, bio_validator):
         with pytest.raises(ValueError, match="max_per_species"):
@@ -501,9 +505,12 @@ class TestBiologyOutputValidator:
         with pytest.raises(ValueError, match="k-mer"):
             bio_output_validator({"k": 0})
 
+    def test_k_at_upper_bound_passes(self, bio_output_validator):
+        bio_output_validator({"k": 9})  # range is [1, 9] to match the grid
+
     def test_k_above_range_rejected(self, bio_output_validator):
         with pytest.raises(ValueError, match="k-mer"):
-            bio_output_validator({"k": 7})
+            bio_output_validator({"k": 10})
 
     def test_k_optional(self, bio_output_validator):
         """A result without 'k' must pass."""

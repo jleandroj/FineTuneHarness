@@ -150,6 +150,15 @@ def main() -> None:
     recover_cmd.add_argument("--run-id", required=True)
     recover_cmd.add_argument("--state-db", default=".finetuneharness/state.db")
 
+    verify_cmd = sub.add_parser(
+        "verify-run",
+        help="Independently re-check a run's SUCCEEDED results (catches fabricated/"
+             "inconsistent results and success states with no execution). Exits 1 on FAIL.",
+    )
+    verify_cmd.add_argument("--run-id", required=True)
+    verify_cmd.add_argument("--state-db", default=".finetuneharness/state.db")
+    verify_cmd.add_argument("--format", dest="fmt", choices=["text", "json"], default="text")
+
     list_runs_cmd = sub.add_parser("list-runs", help="List all runs in the state DB")
     list_runs_cmd.add_argument("--state-db", default=".finetuneharness/state.db")
     list_runs_cmd.add_argument("--format", dest="fmt", choices=["text", "json"], default="text")
@@ -255,6 +264,36 @@ def main() -> None:
         print(f"Recovered {n} stranded task(s) to PENDING in run {args.run_id} (status: {status.value}).")
         if n:
             print(f"Re-run with: finetuneharness run --run-id {args.run_id} --handler MODULE:FUNCTION")
+        return
+
+    if args.command == "verify-run":
+        from finetuneharness.verification import verify_run
+        store = SQLiteStateStore(Path(args.state_db))
+        run = store.get_run(args.run_id)
+        if run is None:
+            print(f"Error: unknown run_id {args.run_id!r}", flush=True)
+            raise SystemExit(1)
+        report = verify_run(store.list_tasks(args.run_id), store.list_events(args.run_id))
+        if args.fmt == "json":
+            print(json.dumps({
+                "run_id": args.run_id,
+                "verdict": report.verdict.value,
+                "checked": report.checked,
+                "findings": [
+                    {"severity": f.severity, "code": f.code, "task_key": f.task_key, "detail": f.detail}
+                    for f in report.findings
+                ],
+            }, indent=2))
+        else:
+            icon = {"PASS": "✓", "WARN": "~", "FAIL": "✗"}.get(report.verdict.value, "?")
+            print(f"{icon} verify-run {report.verdict.value}  ({report.checked} SUCCEEDED tasks checked, "
+                  f"{len(report.fails)} fail / {len(report.warns)} warn)")
+            for f in report.findings:
+                mark = "✗" if f.severity == "fail" else "~"
+                where = f" [{f.task_key}]" if f.task_key else ""
+                print(f"  {mark} {f.code}{where}: {f.detail}")
+        if report.verdict is report.verdict.FAIL:
+            raise SystemExit(1)
         return
 
     if args.command == "status":
