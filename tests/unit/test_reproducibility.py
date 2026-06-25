@@ -202,6 +202,23 @@ def test_manifest_export_contains_required_reproducibility_fields():
     assert "dirty" in git
 
 
+def test_env_snapshot_pins_package_commits():
+    """env_snapshot records the git commit of editable/source-installed packages
+    (e.g. the harness itself), not just the CWD repo — so harness-code drift is
+    auditable. Best-effort: empty when packages are wheel-installed (e.g. CI)."""
+    from finetuneharness.state.env_snapshot import capture_env_snapshot
+
+    snap = capture_env_snapshot()
+    assert "package_commits" in snap
+    pc = snap["package_commits"]
+    assert isinstance(pc, dict)
+    # When resolvable to a git checkout (the dev/editable case), each entry carries
+    # a commit + dirty flag. In a wheel install the dict is simply empty — never wrong.
+    for name, info in pc.items():
+        assert isinstance(info.get("commit"), str) and info["commit"]
+        assert isinstance(info.get("dirty"), bool)
+
+
 # ── Bonus: datasets dict is accepted instead of dataset_hash ──────────────────
 
 def test_create_run_accepts_datasets_dict():

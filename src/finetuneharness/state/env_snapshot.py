@@ -48,6 +48,7 @@ def capture_env_snapshot() -> dict[str, Any]:
     ])
 
     snap.update(_git_info())
+    snap["package_commits"] = _package_commits()
 
     container = _container_info()
     if container:
@@ -75,6 +76,39 @@ def _installed_packages(names: list[str]) -> dict[str, str]:
     for name in names:
         try:
             result[name] = version(name)
+        except Exception:
+            pass
+    return result
+
+
+def _package_commits() -> dict[str, Any]:
+    """Git commit (+dirty) of editable/source-installed packages.
+
+    ``_git_info`` only captures the CWD repo (typically the experiment wrapper). When
+    a package like the harness itself is installed editable, its code can drift
+    independently of the CWD — and provenance would not show it (it appears only as a
+    version string like "0.1.0"). This pins each package's actual commit so harness/
+    training-code drift is auditable. Best-effort: a package not resolvable to a git
+    checkout (e.g. a wheel install) is simply omitted.
+    """
+    import importlib
+
+    result: dict[str, Any] = {}
+    for modname in ("finetuneharness", "promoter_species", "promoter_hsvsmu"):
+        try:
+            mod = importlib.import_module(modname)
+            f = getattr(mod, "__file__", None)
+            if not f:
+                continue
+            src = str(Path(f).resolve().parent)
+            commit = subprocess.check_output(
+                ["git", "-C", src, "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True
+            ).strip()
+            dirty = subprocess.call(
+                ["git", "-C", src, "diff", "--quiet", "HEAD"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ) != 0
+            result[modname] = {"commit": commit, "dirty": dirty}
         except Exception:
             pass
     return result
